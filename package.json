@@ -1,7 +1,7 @@
 {
-  "name": "atomdoc-client",
+  "name": "atomdoc-ts",
   "version": "0.1.0",
-  "description": "TypeScript client for AtomDoc document protocol",
+  "description": "AtomDoc document model for TypeScript",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
