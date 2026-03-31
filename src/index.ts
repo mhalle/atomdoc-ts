@@ -33,6 +33,15 @@ export type {
   AtomDocSchema,
   JsonDoc,
 } from "./types.js";
+export {
+  defineNode,
+  defineValue,
+  buildSchema,
+  type NodeDef,
+  type ValueDef,
+  type FieldDef,
+  type FieldType,
+} from "./define.js";
 
 // Thick client (offline-capable)
 export {
