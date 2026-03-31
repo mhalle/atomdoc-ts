@@ -1,6 +1,8 @@
-# atomdoc-client
+# atomdoc-ts
 
-TypeScript client for the [AtomDoc](../atomdoc) document protocol. Connect to a Python AtomDoc server, render documents reactively, and send operations back.
+TypeScript client for the [AtomDoc](https://github.com/mhalle/atomdoc) document protocol. Connect to a Python AtomDoc server, render documents reactively, and send operations back.
+
+> **Note:** This package was previously called `atomdoc-client`. It has been renamed to `atomdoc-ts`.
 
 Two client modes:
 
@@ -12,7 +14,7 @@ Both use the same `NodeStore` for reactivity. UI code (React hooks, Solid signal
 ## Install
 
 ```bash
-npm install atomdoc-client
+npm install atomdoc-ts
 ```
 
 ## Quick Start
@@ -20,7 +22,7 @@ npm install atomdoc-client
 ### Thin Client
 
 ```ts
-import { AtomDocClient } from "atomdoc-client";
+import { AtomDocClient } from "atomdoc-ts";
 
 const client = new AtomDocClient("ws://localhost:8765");
 
@@ -47,7 +49,7 @@ await client.connect();
 ### Thick Client
 
 ```ts
-import { ThickAtomDocClient } from "atomdoc-client";
+import { ThickAtomDocClient } from "atomdoc-ts";
 
 const client = new ThickAtomDocClient({ url: "ws://localhost:8765" });
 
@@ -74,13 +76,13 @@ client.onOnline(() => console.log("Back online — syncing"));
 
 ```
 Python Server (authoritative)
-  ↕ WebSocket (schema / snapshot / patch / op / create / undo / redo)
+  | WebSocket (schema / snapshot / patch / op / create / undo / redo)
 TypeScript Client
-  ├─ NodeStore        — reactive flat map of nodes, subscriptions
-  ├─ SchemaRegistry   — Zod validators from server schema
-  ├─ [thin] direct send/receive
-  └─ [thick] LocalDoc — local tree, undo, offline buffer
-       └─ bridge → NodeStore (same reactive API)
+  |-- NodeStore        — reactive flat map of nodes, subscriptions
+  |-- SchemaRegistry   — Zod validators from server schema
+  |-- [thin] direct send/receive
+  +-- [thick] LocalDoc — local tree, undo, offline buffer
+       +-- bridge -> NodeStore (same reactive API)
 ```
 
 ## Core Concepts
@@ -94,7 +96,7 @@ interface StoreNode {
   id: string;
   type: string;
   state: Record<string, unknown>;
-  slots: Record<string, string[]>;  // slot name → ordered child IDs
+  slots: Record<string, string[]>;  // slot name -> ordered child IDs
   parentId: string | null;
   slotName: string | null;
 }
@@ -149,12 +151,46 @@ const color = schema.validate("Color", { r: 255, g: 0, b: 0 });
 const zodSchema = schema.getZodSchema("Color");
 ```
 
+### Schema Definition
+
+Define document schemas directly in TypeScript using `defineNode()`, `defineValue()`, and `buildSchema()`. The generated schema uses the same wire format as the Python `@node` decorator and `doc.atomdoc_schema()`, so schemas defined in TypeScript are fully compatible with the Python server.
+
+```ts
+import { defineNode, defineValue, buildSchema } from "atomdoc-ts";
+
+const Color = defineValue("Color", {
+  r: { type: "integer", default: 0 },
+  g: { type: "integer", default: 0 },
+  b: { type: "integer", default: 0 },
+}, { frozen: true });
+
+const Annotation = defineNode("Annotation", {
+  label: { type: "string", default: "" },
+  color: { type: "object", schema: Color, tier: "atomic", default: { r: 0, g: 0, b: 0 } },
+});
+
+const Page = defineNode("Page", {
+  title: { type: "string", default: "" },
+}, {
+  slots: { annotations: "Annotation" },
+});
+
+const schema = buildSchema("Page", [Page, Annotation], [Color]);
+// schema is identical in format to Python's doc.atomdoc_schema()
+```
+
+This is useful for:
+
+- Defining schemas in a shared TypeScript module that both client and tests can use
+- Writing integration tests that validate schema compatibility between TS and Python
+- Local-only document creation without a server
+
 ## Thin Client API
 
 ### AtomDocClient
 
 ```ts
-import { AtomDocClient } from "atomdoc-client";
+import { AtomDocClient } from "atomdoc-ts";
 
 const client = new AtomDocClient("ws://localhost:8765");
 ```
@@ -203,7 +239,7 @@ client.onError((err) => {                   // server rejected an operation
 Buffer multiple operations and send as one atomic batch:
 
 ```ts
-import { Transaction } from "atomdoc-client";
+import { Transaction } from "atomdoc-ts";
 
 const tx = client.begin();
 
@@ -234,14 +270,14 @@ if (tx.dirty) {
 }
 ```
 
-An uncommitted transaction is disposable — if you lose the reference or navigate away, nothing was sent. No cleanup needed.
+An uncommitted transaction is disposable -- if you lose the reference or navigate away, nothing was sent. No cleanup needed.
 
 ### Operation Constructors
 
 For lower-level control, build wire messages directly:
 
 ```ts
-import { setField, deleteNode, moveNode, createNode, undo, redo } from "atomdoc-client";
+import { setField, deleteNode, moveNode, createNode, undo, redo } from "atomdoc-ts";
 
 // These return message objects — send them with client.send()
 client.send(setField(nodeId, "title", "Hello"));
@@ -257,7 +293,7 @@ client.send(redo(3));
 ### ThickAtomDocClient
 
 ```ts
-import { ThickAtomDocClient } from "atomdoc-client";
+import { ThickAtomDocClient } from "atomdoc-ts";
 
 const client = new ThickAtomDocClient({
   url: "ws://localhost:8765",
@@ -281,7 +317,7 @@ client.getUndoManager();  // UndoManager
 client.isOnline();        // connection status
 ```
 
-#### Mutations — Local First
+#### Mutations -- Local First
 
 All mutations apply instantly to the local document and NodeStore. The forward operations are sent to the server in the background.
 
@@ -363,7 +399,7 @@ The `NodeStore` is framework-agnostic. Here are patterns for popular frameworks.
 
 ```tsx
 import { useSyncExternalStore, useCallback } from "react";
-import type { NodeStore, StoreNode } from "atomdoc-client";
+import type { NodeStore, StoreNode } from "atomdoc-ts";
 
 function useNode(store: NodeStore, nodeId: string): StoreNode | undefined {
   return useSyncExternalStore(
@@ -421,7 +457,7 @@ function PageView({ store, client }) {
 
 ```tsx
 import { createSignal, onCleanup } from "solid-js";
-import type { NodeStore, StoreNode } from "atomdoc-client";
+import type { NodeStore, StoreNode } from "atomdoc-ts";
 
 function useNode(store: NodeStore, nodeId: string) {
   const [node, setNode] = createSignal(store.getNode(nodeId));
@@ -509,11 +545,11 @@ function ColorEditor({ store, nodeId, client }) {
 }
 ```
 
-The color is edited locally with draft state. One `setField` call on apply — one operation, one undo step, atomically replacing the entire frozen `Color` value.
+The color is edited locally with draft state. One `setField` call on apply -- one operation, one undo step, atomically replacing the entire frozen `Color` value.
 
 ## Python Server Setup
 
-The client connects to an AtomDoc Python server:
+The client connects to an [AtomDoc](https://github.com/mhalle/atomdoc) Python server:
 
 ```python
 import asyncio
@@ -562,7 +598,9 @@ asyncio.run(main())
 
 ## Wire Protocol Reference
 
-### Server → Client
+See [PROTOCOL.md](PROTOCOL.md) for the full wire protocol specification.
+
+### Server -> Client
 
 | Message | Fields | When |
 |---------|--------|------|
@@ -571,7 +609,7 @@ asyncio.run(main())
 | `patch` | `version`, `operations: WireOperations`, `source_client` | After each commit |
 | `error` | `ref?`, `code`, `message` | On invalid operation |
 
-### Client → Server
+### Client -> Server
 
 | Message | Fields | When |
 |---------|--------|------|
@@ -609,6 +647,10 @@ The `0` sentinel represents null (root parent, no positioning).
 | **Use case** | Dashboards, simple views | Editors, collaborative tools |
 
 For read-heavy UIs with occasional edits, thin is simpler. For interactive editors where responsiveness matters, thick.
+
+## Related
+
+- [atomdoc](https://github.com/mhalle/atomdoc) -- Python server and document model
 
 ## License
 
