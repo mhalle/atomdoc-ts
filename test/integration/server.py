@@ -41,7 +41,8 @@ async def main():
     ))
 
     session = Session(doc)
-    transport = WebSocketTransport(host="localhost", port=9876)
+    port = int(os.environ.get("PORT", "9876"))
+    transport = WebSocketTransport(host="localhost", port=port)
     await session.bind(transport)
 
     print("SERVER_READY", flush=True)

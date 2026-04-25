@@ -132,7 +132,7 @@ describe("ThickAtomDocClient", () => {
       version: 1,
       operations: {
         ordered: [],
-        state: { i1: { label: '"Remote"' } },
+        state: { i1: { label: "Remote" } },
       },
       source_client: "other-client",
     } as PatchMsg);

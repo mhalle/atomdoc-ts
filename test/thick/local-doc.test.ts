@@ -198,7 +198,7 @@ describe("LocalDoc", () => {
     const doc = makeDoc();
     doc.applyOperations({
       ordered: [],
-      state: { a1: { label: '"Remote"' } },
+      state: { a1: { label: "Remote" } },
     });
     expect(doc.getNode("a1")!.state.label).toBe("Remote");
   });

@@ -15,7 +15,7 @@ describe("Transaction", () => {
 
     const msg = tx.toMessage();
     expect(msg.operations.state).toEqual({
-      n1: { title: '"Hello"' },
+      n1: { title: "Hello" },
     });
     expect(msg.operations.ordered).toEqual([]);
   });
@@ -27,8 +27,8 @@ describe("Transaction", () => {
 
     const msg = tx.toMessage();
     expect(msg.operations.state.n1).toEqual({
-      title: '"Hello"',
-      color: '{"r":255}',
+      title: "Hello",
+      color: { r: 255 },
     });
   });
 
@@ -38,7 +38,7 @@ describe("Transaction", () => {
     tx.setField("n1", "title", "Second");
 
     const msg = tx.toMessage();
-    expect(msg.operations.state.n1.title).toBe('"Second"');
+    expect(msg.operations.state.n1.title).toBe("Second");
   });
 
   it("buffers deleteNode", () => {
@@ -74,7 +74,7 @@ describe("Transaction", () => {
     tx.setField("n1", "a", 1).setField("n1", "b", 2).deleteNode("n2");
 
     const msg = tx.toMessage();
-    expect(msg.operations.state.n1).toEqual({ a: "1", b: "2" });
+    expect(msg.operations.state.n1).toEqual({ a: 1, b: 2 });
     expect(msg.operations.ordered).toHaveLength(1);
   });
 

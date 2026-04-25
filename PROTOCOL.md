@@ -151,7 +151,7 @@ Sent after every committed transaction.
       [0, [["ann-3", "Annotation"]], 0, "annotations", "ann-2", 0]
     ],
     "state": {
-      "ann-3": { "label": "\"Third\"" }
+      "ann-3": { "label": "Third" }
     }
   },
   "source_client": "e99065b8-8503-4bae-a3f8-a47205a93cbb"
@@ -183,7 +183,7 @@ Sent to the client that caused an error.
   "ref": "msg-123",
   "operations": {
     "ordered": [],
-    "state": { "node-id": { "title": "\"New Title\"" } }
+    "state": { "node-id": { "title": "New Title", "color": { "r": 255, "g": 0, "b": 0 } } }
   }
 }
 ```
@@ -261,14 +261,18 @@ Field value changes. Applied after ordered operations.
 ```json
 {
   "node-id": {
-    "field-name": "\"json-stringified-value\""
+    "label": "Third",
+    "count": 42,
+    "color": { "r": 255, "g": 0, "b": 0 }
   }
 }
 ```
 
-Values are **JSON-stringified strings**. A string value `"hello"` becomes `"\"hello\""`. A number `42` becomes `"42"`. An object `{r:255}` becomes `"{\"r\":255}"`.
+Values are **native JSON** — strings, numbers, booleans, arrays, objects, or `null`. Same encoding used by `snapshot` and `create` messages.
 
-To apply: `JSON.parse(value)` for each field.
+**Opaque fields** (tier `"opaque"`): the value is a JSON string containing base64-encoded bytes. The receiver decodes based on the field's schema tier (not on the shape of the value).
+
+To apply: use the value as-is for mergeable/atomic fields; `base64` decode for opaque fields.
 
 ### The `0` Sentinel
 
@@ -393,7 +397,7 @@ Functions that build and send client messages.
 
 ```
 setField(nodeId, field, value):
-  send { type: "op", operations: { ordered: [], state: { nodeId: { field: JSON.stringify(value) } } } }
+  send { type: "op", operations: { ordered: [], state: { nodeId: { field: value } } } }
 
 createNode(type, state, parentId, slot, position):
   send { type: "create", node_type: type, state, parent_id: parentId, slot, position }

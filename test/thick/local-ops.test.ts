@@ -37,7 +37,7 @@ describe("state tracking", () => {
     const inv = createOpsAccumulator();
 
     onSetStateInverse(diff, inv, node, "title");
-    expect(inv.state.n1.title).toBe('"old"');
+    expect(inv.state.n1.title).toBe("old");
   });
 
   it("does not overwrite inverse on second set", () => {
@@ -51,7 +51,7 @@ describe("state tracking", () => {
     onSetStateInverse(diff, inv, node, "title");
 
     // Should still have the original value
-    expect(inv.state.n1.title).toBe('"original"');
+    expect(inv.state.n1.title).toBe("original");
   });
 
   it("skips inverse for inserted nodes", () => {
@@ -70,10 +70,10 @@ describe("state tracking", () => {
     const diff = createDiff();
     const fwd = createOpsAccumulator();
     const inv = createOpsAccumulator();
-    inv.state.n1 = { title: '"old"' };
+    inv.state.n1 = { title: "old" };
 
     onSetStateForward(diff, fwd, inv, node, "title");
-    expect(fwd.state.n1.title).toBe('"new"');
+    expect(fwd.state.n1.title).toBe("new");
     expect(diff.updated.has("n1")).toBe(true);
   });
 
@@ -82,9 +82,9 @@ describe("state tracking", () => {
     node.state.title = "old"; // reverted back
     const diff = createDiff();
     const fwd = createOpsAccumulator();
-    fwd.state.n1 = { title: '"changed"' };
+    fwd.state.n1 = { title: "changed" };
     const inv = createOpsAccumulator();
-    inv.state.n1 = { title: '"old"' };
+    inv.state.n1 = { title: "old" };
 
     onSetStateForward(diff, fwd, inv, node, "title");
     expect(fwd.state.n1).toBeUndefined();
@@ -175,7 +175,7 @@ describe("applyOperations", () => {
 
     const ops: WireOperations = {
       ordered: [[0, [["c", "Item"]], 0, "items", "b", 0]],
-      state: { c: { label: '"C"' } },
+      state: { c: { label: "C" } },
     };
 
     applyOperations(nodeMap, root, ops, createNode, insertIntoSlot);
@@ -206,7 +206,7 @@ describe("applyOperations", () => {
 
     const ops: WireOperations = {
       ordered: [],
-      state: { a: { label: '"Updated"' } },
+      state: { a: { label: "Updated" } },
     };
 
     applyOperations(nodeMap, root, ops, createNode, insertIntoSlot);

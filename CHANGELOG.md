@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.3.0
+
+### Breaking Changes
+
+- **Wire protocol**: state values in `op` and `patch` messages are now native
+  JSON rather than JSON-stringified strings. `op`/`patch` now match the
+  encoding already used by `snapshot` and `create`. Opaque/bytes fields
+  continue to travel as base64-encoded JSON strings; receivers decode based
+  on the field's schema tier. Requires atomdoc (Python) >= 0.3.0.
+- `WireOperations.state` typed as `Record<string, Record<string, unknown>>`.
+- Fixed move-op reactivity bug in `applyPatch`: the thin-client patch applier
+  now creates a new node object when updating `parentId`/`slotName` during a
+  move, instead of mutating in place. Reactive subscribers using reference
+  equality will now detect the change.
+
+### Migration
+
+If you hand-build state patches in tests or tooling, drop the `JSON.stringify`
+wrapping of values. Receivers that were calling `JSON.parse` on values can
+remove the call.
+
 ## 0.2.0
 
 ### Breaking Changes

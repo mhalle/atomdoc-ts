@@ -328,8 +328,7 @@ export class LocalDoc {
         for (const [nodeId, patches] of Object.entries(ops.state)) {
           const node = this.nodeMap.get(nodeId);
           if (!node) continue;
-          for (const [key, strVal] of Object.entries(patches)) {
-            const value = JSON.parse(strVal);
+          for (const [key, value] of Object.entries(patches)) {
             const isAttached = this.nodeMap.has(nodeId);
             if (isAttached) {
               onSetStateInverse(this._diff, this._inverseOps, node, key);

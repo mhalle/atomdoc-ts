@@ -52,8 +52,12 @@ export type OrderedOp = InsertOp | DeleteOp | MoveOp;
 
 export interface WireOperations {
   ordered: OrderedOp[];
-  /** { nodeId: { field: jsonStringValue } } */
-  state: Record<string, Record<string, string>>;
+  /**
+   * State patches — native JSON values per field.
+   * Opaque/bytes fields are base64-encoded strings; the receiver decodes
+   * based on the field's schema tier.
+   */
+  state: Record<string, Record<string, unknown>>;
 }
 
 // ---------------------------------------------------------------------------

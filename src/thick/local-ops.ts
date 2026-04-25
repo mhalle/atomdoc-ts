@@ -20,7 +20,7 @@ import {
 
 export interface OpsAccumulator {
   ordered: OrderedOp[];
-  state: Record<string, Record<string, string>>;
+  state: Record<string, Record<string, unknown>>;
 }
 
 export interface Diff {
@@ -47,9 +47,15 @@ export function createDiff(): Diff {
 // State tracking
 // ---------------------------------------------------------------------------
 
-function stringifyState(node: DocNode, key: string): string {
-  const value = node.state[key];
-  return JSON.stringify(value ?? null);
+function stateValue(node: DocNode, key: string): unknown {
+  return node.state[key] ?? null;
+}
+
+function valuesEqual(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  // Structural equality for arrays/objects — cheap JSON compare is fine here
+  // because both sides came from the same state dict and are JSON-compatible.
+  return JSON.stringify(a) === JSON.stringify(b);
 }
 
 export function onSetStateInverse(
@@ -60,7 +66,7 @@ export function onSetStateInverse(
 ): void {
   if (diff.inserted.has(node.id)) return;
   if (inverseOps.state[node.id]?.[key] !== undefined) return;
-  const original = stringifyState(node, key);
+  const original = stateValue(node, key);
   if (!inverseOps.state[node.id]) inverseOps.state[node.id] = {};
   inverseOps.state[node.id][key] = original;
 }
@@ -72,11 +78,11 @@ export function onSetStateForward(
   node: DocNode,
   key: string,
 ): void {
-  const valueString = stringifyState(node, key);
-  const prevValueString = inverseOps.state[node.id]?.[key];
+  const newValue = stateValue(node, key);
+  const prevValue = inverseOps.state[node.id]?.[key];
   const nodePatch = forwardOps.state[node.id];
 
-  if (prevValueString === valueString && nodePatch !== undefined) {
+  if (valuesEqual(prevValue, newValue) && nodePatch !== undefined) {
     delete nodePatch[key];
     if (Object.keys(nodePatch).length === 0) {
       delete forwardOps.state[node.id];
@@ -86,7 +92,7 @@ export function onSetStateForward(
     if (invNode) delete invNode[key];
   } else {
     if (!forwardOps.state[node.id]) forwardOps.state[node.id] = {};
-    forwardOps.state[node.id][key] = valueString;
+    forwardOps.state[node.id][key] = newValue;
     if (!diff.inserted.has(node.id)) {
       diff.updated.add(node.id);
     }
@@ -110,10 +116,10 @@ function copyInsertedToDiff(
   } else {
     diff.inserted.add(node.id);
   }
-  // Serialize non-default state for the insert op
-  const jsonState: Record<string, string> = {};
+  // Record non-default state for the insert op (native JSON values)
+  const jsonState: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(node.state)) {
-    jsonState[k] = JSON.stringify(v);
+    jsonState[k] = v;
   }
   if (Object.keys(jsonState).length > 0) {
     forwardOps.state[node.id] = jsonState;
@@ -256,10 +262,10 @@ function copyDeletedToDiff(
     diff.inserted.delete(node.id);
     diff.moved.delete(node.id);
   } else {
-    // Capture current state for undo
-    const currentState: Record<string, string> = {};
+    // Capture current state for undo (native JSON values)
+    const currentState: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(node.state)) {
-      currentState[k] = JSON.stringify(v);
+      currentState[k] = v;
     }
     const prevInv = inverseOps.state[node.id] ?? {};
     inverseOps.state[node.id] = { ...currentState, ...prevInv };
@@ -479,8 +485,8 @@ export function applyOperations(
   for (const [nodeId, patches] of Object.entries(ops.state)) {
     const node = nodeMap.get(nodeId);
     if (!node) continue;
-    for (const [key, strVal] of Object.entries(patches)) {
-      node.state[key] = JSON.parse(strVal);
+    for (const [key, value] of Object.entries(patches)) {
+      node.state[key] = value;
     }
   }
 }

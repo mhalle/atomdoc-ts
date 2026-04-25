@@ -17,6 +17,8 @@ import type { AtomDocSchema } from "../../src/types.js";
 // --- Python server ---
 
 let server: ChildProcess;
+const PORT = 9877;
+const WS_URL = `ws://localhost:${PORT}`;
 
 function startServer(): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -24,6 +26,7 @@ function startServer(): Promise<void> {
     server = spawn("uv", ["run", "python", serverPath], {
       cwd: new URL("../../../atomdoc", import.meta.url).pathname,
       stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env, PORT: String(PORT) },
     });
 
     const timeout = setTimeout(
@@ -54,7 +57,7 @@ function startServer(): Promise<void> {
 
 function getPythonSchema(): Promise<AtomDocSchema> {
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket("ws://localhost:9876");
+    const ws = new WebSocket(WS_URL);
     const timeout = setTimeout(() => reject(new Error("Timeout")), 5000);
 
     ws.onmessage = (event) => {
@@ -208,7 +211,7 @@ describe("Schema compatibility: Python vs TypeScript", () => {
   it("TS schema can be used to load Python snapshot", async () => {
     // Connect and get snapshot from Python
     const snapshot = await new Promise<any>((resolve, reject) => {
-      const ws = new WebSocket("ws://localhost:9876");
+      const ws = new WebSocket(WS_URL);
       const timeout = setTimeout(() => reject(new Error("Timeout")), 5000);
       ws.onmessage = (event) => {
         const msg = JSON.parse(event.data.toString());
@@ -241,7 +244,7 @@ describe("Schema compatibility: Python vs TypeScript", () => {
   it("TS-created ops work on Python server", async () => {
     // Connect, send an op from TS, verify it works
     const result = await new Promise<boolean>((resolve, reject) => {
-      const ws = new WebSocket("ws://localhost:9876");
+      const ws = new WebSocket(WS_URL);
       const timeout = setTimeout(() => reject(new Error("Timeout")), 5000);
       let rootId = "";
 
@@ -256,7 +259,7 @@ describe("Schema compatibility: Python vs TypeScript", () => {
               operations: {
                 ordered: [],
                 state: {
-                  [rootId]: { title: JSON.stringify("Updated from TS") },
+                  [rootId]: { title: "Updated from TS" },
                 },
               },
             }),
@@ -266,7 +269,7 @@ describe("Schema compatibility: Python vs TypeScript", () => {
           ws.close();
           // Verify the patch echoes our change
           const titlePatch = msg.operations.state[rootId]?.title;
-          resolve(titlePatch === JSON.stringify("Updated from TS"));
+          resolve(titlePatch === "Updated from TS");
         }
       };
 

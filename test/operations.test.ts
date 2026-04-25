@@ -14,22 +14,18 @@ describe("setField", () => {
     expect(msg.type).toBe("op");
     expect(msg.operations.ordered).toEqual([]);
     expect(msg.operations.state).toEqual({
-      n1: { title: '"Hello"' },
+      n1: { title: "Hello" },
     });
   });
 
-  it("serializes numbers", () => {
+  it("passes numbers through as native JSON", () => {
     const msg = setField("n1", "count", 42);
-    expect(msg.operations.state.n1.count).toBe("42");
+    expect(msg.operations.state.n1.count).toBe(42);
   });
 
-  it("serializes objects", () => {
+  it("passes objects through as native JSON", () => {
     const msg = setField("n1", "color", { r: 255, g: 0, b: 0 });
-    expect(JSON.parse(msg.operations.state.n1.color)).toEqual({
-      r: 255,
-      g: 0,
-      b: 0,
-    });
+    expect(msg.operations.state.n1.color).toEqual({ r: 255, g: 0, b: 0 });
   });
 });
 

@@ -17,7 +17,7 @@ export class Transaction {
   setField(nodeId: string, field: string, value: unknown): this {
     this._checkOpen();
     if (!this.state[nodeId]) this.state[nodeId] = {};
-    this.state[nodeId][field] = JSON.stringify(value);
+    this.state[nodeId][field] = value;
     return this;
   }
 

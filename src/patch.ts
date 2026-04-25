@@ -25,10 +25,9 @@ export function applyPatch(
       }
     }
 
-    // Apply state patches
+    // Apply state patches (values are native JSON — no parsing needed)
     for (const [nodeId, patches] of Object.entries(operations.state)) {
-      for (const [field, jsonStr] of Object.entries(patches)) {
-        const value = JSON.parse(jsonStr);
+      for (const [field, value] of Object.entries(patches)) {
         store._updateState(nodeId, field, value);
       }
     }
@@ -172,12 +171,12 @@ function applyMove(
   ];
   store._setChildren(oldParentId, oldSlot, remaining);
 
-  // Update parent/slot on moved nodes
+  // Update parent/slot on moved nodes (immutable update so reactive
+  // subscribers see a new object reference — see NodeStore contract).
   for (const id of movedIds) {
     const node = store.getNode(id);
     if (node) {
-      node.parentId = newParentId;
-      node.slotName = slotName;
+      store._setNode(id, { ...node, parentId: newParentId, slotName });
     }
   }
 

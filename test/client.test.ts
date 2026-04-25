@@ -104,7 +104,7 @@ describe("AtomDocClient", () => {
       version: 1,
       operations: {
         ordered: [[0, [["ann-2", "Annotation"]], 0, "annotations", "ann-1", 0]],
-        state: { "ann-2": { label: '"New"' } },
+        state: { "ann-2": { label: "New" } },
       },
       source_client: "other",
     } as PatchMsg);

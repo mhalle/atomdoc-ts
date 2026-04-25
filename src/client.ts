@@ -88,7 +88,7 @@ export class AtomDocClient {
       type: "op",
       operations: {
         ordered: [],
-        state: { [nodeId]: { [field]: JSON.stringify(value) } },
+        state: { [nodeId]: { [field]: value } },
       },
     });
   }

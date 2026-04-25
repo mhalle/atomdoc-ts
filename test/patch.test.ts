@@ -27,7 +27,7 @@ describe("applyPatch", () => {
     const store = makeStore();
     applyPatch(store, {
       ordered: [],
-      state: { a1: { label: '"Updated"' } },
+      state: { a1: { label: "Updated" } },
     });
     expect(store.getNode("a1")!.state.label).toBe("Updated");
   });
@@ -37,8 +37,8 @@ describe("applyPatch", () => {
     applyPatch(store, {
       ordered: [],
       state: {
-        a1: { label: '"X"' },
-        root: { title: '"New Title"' },
+        a1: { label: "X" },
+        root: { title: "New Title" },
       },
     });
     expect(store.getNode("a1")!.state.label).toBe("X");
@@ -49,7 +49,7 @@ describe("applyPatch", () => {
     const store = makeStore();
     applyPatch(store, {
       ordered: [[0, [["a4", "Annotation"]], 0, "annotations", "a3", 0]],
-      state: { a4: { label: '"Fourth"' } },
+      state: { a4: { label: "Fourth" } },
     });
     expect(store.getNode("a4")).toBeDefined();
     expect(store.getNode("a4")!.type).toBe("Annotation");
@@ -123,7 +123,7 @@ describe("applyPatch", () => {
 
     applyPatch(store, {
       ordered: [[0, [["a4", "Annotation"]], 0, "annotations", "a3", 0]],
-      state: { root: { title: '"Changed"' } },
+      state: { root: { title: "Changed" } },
     });
 
     // Should only fire once despite multiple mutations to root
