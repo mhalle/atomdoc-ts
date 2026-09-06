@@ -1,6 +1,11 @@
-export { LocalDoc, type ChangeEvent } from "./local-doc.js";
+export { LocalDoc, RefIntegrityError, type ChangeEvent } from "./local-doc.js";
 export { type DocNode, createDocNode, getSlotChildren } from "./doc-node.js";
-export { UndoManager } from "./undo-manager.js";
+export {
+  UndoManager,
+  type UndoManagerOptions,
+  type UndoHistory,
+  type UndoHistoryItem,
+} from "./undo-manager.js";
 export {
   ThickAtomDocClient,
   type ThickClientOptions,
@@ -12,5 +17,5 @@ export {
   incrementBase64,
   randomBase64,
 } from "./node-id.js";
-export { type Diff, type OpsAccumulator } from "./local-ops.js";
-export { type LifecycleStage } from "./local-transaction.js";
+export { mergeOperations, type Diff, type OpsAccumulator } from "./local-ops.js";
+export { type LifecycleStage, type TransactionFlags } from "./local-transaction.js";

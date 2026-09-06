@@ -142,6 +142,7 @@ schema.nodeTypeNames();                         // ["Page", "Annotation"]
 schema.valueTypeNames();                        // ["Color"]
 schema.getFieldTier("Annotation", "color");     // "atomic"
 schema.getSlots("Page");                        // { annotations: { allowed_type: "Annotation" } }
+schema.getRefs("Volume");                       // { transform: { target_type: "Transform", many: false, policy: "restrict" } }
 schema.getDefaults("Annotation");               // { label: "", color: { r: 0, g: 0, b: 0 } }
 
 // Validate data against a type
@@ -171,6 +172,10 @@ const Annotation = defineNode("Annotation", {
 
 const Page = defineNode("Page", {
   title: { type: "string", default: "" },
+  // A reference to another node in the same document — stored as its ID
+  cover: { type: "ref", target: "Annotation", default: null },
+  // Several targets: an array of IDs
+  related: { type: "ref", target: "Annotation", many: true, default: [] },
 }, {
   slots: { annotations: "Annotation" },
 });
@@ -178,6 +183,16 @@ const Page = defineNode("Page", {
 const schema = buildSchema("Page", [Page, Annotation], [Color]);
 // schema is identical in format to Python's doc.atomdoc_schema()
 ```
+
+A `ref` field is the TypeScript spelling of Python's `Ref[T]` (`many: true`
+for `list[Ref[T]]`). Slots are ownership; references are association and
+never control a node's lifetime. `LocalDoc` keeps a reverse index
+(`doc.referrers(nodeId, field?)`) and checks referential integrity when a
+transaction commits: a reference must resolve to a node of the declared
+type, and a node that is still referenced cannot be deleted. A violation
+throws `RefIntegrityError` and rolls the transaction back, so re-point the
+referrers and delete the old target in one transaction. Moving a node is
+not a delete.
 
 This is useful for:
 
@@ -297,7 +312,8 @@ import { ThickAtomDocClient } from "atomdoc-ts";
 
 const client = new ThickAtomDocClient({
   url: "ws://localhost:8765",
-  maxUndoSteps: 100,          // optional, default 100
+  maxUndoSteps: 100,          // optional, default 100; 0 disables undo
+  mergeInterval: 500,         // optional ms, default 0; collapses quick edits into one undo step
 });
 ```
 
@@ -330,12 +346,15 @@ const newId = client.createNode("Annotation", { label: "New" }, parentId, "annot
 console.log("Created:", newId); // available immediately
 
 client.deleteNode(nodeId);
-client.moveNode(nodeId, newParentId, "children");
+client.moveNode(nodeId, newParentId, "children");          // append to a slot
+client.moveNodeRelative(nodeId, siblingId, "after");        // position next to a sibling
 ```
 
 #### Local Undo/Redo
 
-Undo and redo work entirely on the client. No server round-trip.
+Undo and redo work entirely on the client. No server round-trip. Patches
+received from other clients are applied with `skipUndo`, so undo only ever
+reverts this client's own edits.
 
 ```ts
 client.undo();
@@ -346,6 +365,25 @@ client.undo(3);  // undo 3 steps at once
 client.getUndoManager().canUndo;
 client.getUndoManager().canRedo;
 ```
+
+Undo history can be carried over when a document is rebuilt from a newer
+snapshot, as long as the ID and root type match:
+
+```ts
+const history = client.getUndoManager().exportHistory();
+// ... later, on a new LocalDoc/UndoManager for the same document
+undoManager.importHistory(history);
+```
+
+The exported history is plain JSON. Its `lastUpdate` timestamp comes from
+the exporting manager's clock (`Date.now` by default), so a merge window can
+continue across the transfer only when both managers share a clock.
+
+On a `LocalDoc` directly, `applyOperations(ops, { skipUndo: true })` runs
+operations in a transaction the undo manager ignores, and every
+`ChangeEvent` carries `flags.skipUndo`. A `skipUndo` transaction is always
+isolated: if one is already open it is committed first, so your own pending
+edits keep their undo entry.
 
 #### Events
 
@@ -389,6 +427,18 @@ doc.onChange((event) => {
 
 // Serialize
 const snapshot = doc.toSnapshot();  // wire format [id, type, state, slots]
+```
+
+Reference fields (tier `"ref"`) are resolved through the node map, and the
+document answers the reverse question:
+
+```ts
+const vol = doc.getNode(volId)!;
+doc.getNode(vol.state.transform as string);     // the referenced node
+doc.referrers(transformId);                     // nodes that point at it
+doc.referrers(transformId, "transform");        // only via that field
+
+doc.deleteRange(transformId);                   // throws RefIntegrityError while referenced
 ```
 
 ## Framework Integration

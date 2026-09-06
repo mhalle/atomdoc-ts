@@ -201,3 +201,45 @@ describe("self-referential nodes", () => {
     expect(nested[0].state.label).toBe("Child");
   });
 });
+
+describe("ref fields", () => {
+  const Transform = defineNode("Transform", {
+    name: { type: "string", default: "" },
+    parent: { type: "ref", target: "Transform", default: null },
+  });
+  const Volume = defineNode("Volume", {
+    transform: { type: "ref", target: "Transform", default: null },
+    sources: { type: "ref", target: "Volume", many: true, default: [] },
+    tag: { type: "ref", default: null },
+  });
+  const Scene = defineNode("Scene", {}, {
+    slots: { transforms: "Transform", volumes: "Volume" },
+  });
+  const refSchema = buildSchema("Scene", [Scene, Transform, Volume]);
+
+  it("exports tier 'ref' and a refs block", () => {
+    const vol = refSchema.node_types.Volume;
+    expect(vol.field_tiers.transform).toBe("ref");
+    expect(vol.field_tiers.sources).toBe("ref");
+    expect(vol.refs).toEqual({
+      transform: { target_type: "Transform", many: false, policy: "restrict" },
+      sources: { target_type: "Volume", many: true, policy: "restrict" },
+      tag: { target_type: null, many: false, policy: "restrict" },
+    });
+  });
+
+  it("exports references as node ids in the JSON schema", () => {
+    const props = refSchema.node_types.Volume.json_schema.properties as Record<string, unknown>;
+    expect(props.transform).toEqual({ type: "string", default: null });
+    expect(props.sources).toEqual({ type: "array", items: { type: "string" }, default: [] });
+  });
+
+  it("registry exposes ref definitions", () => {
+    const registry = new SchemaRegistry(refSchema);
+    expect(registry.getRef("Volume", "transform")?.target_type).toBe("Transform");
+    expect(registry.getRef("Volume", "nope")).toBeUndefined();
+    expect(Object.keys(registry.getRefs("Transform"))).toEqual(["parent"]);
+    expect(registry.getRefs("Scene")).toEqual({});
+    expect(registry.getFieldTier("Volume", "sources")).toBe("ref");
+  });
+});

@@ -464,20 +464,32 @@ export function applyOperations(
       const end = nodeMap.get(endId);
       if (!start || !end) continue;
 
+      const prevIdRaw = op[5];
+      const nextIdRaw = op[6];
+
       const parent =
         parentIdRaw === 0 ? root : nodeMap.get(String(parentIdRaw));
       if (!parent) continue;
 
+      // Capture the range before detaching (detach clears the end pointers)
+      const movedNodes = iterRange(start, end);
+      const prev = prevIdRaw ? nodeMap.get(String(prevIdRaw)) : undefined;
+      const next = nextIdRaw ? nodeMap.get(String(nextIdRaw)) : undefined;
+
       // Detach from old position
       detachRange(start, end);
-
-      // Re-insert at new position
-      const movedNodes = iterRange(start, end);
-      // Reset sibling pointers after detach
       start.prevSibling = null;
       end.nextSibling = null;
 
-      insertIntoSlotFn(parent, slotName, "append", movedNodes);
+      // Re-insert where the operation recorded it: after prev, before
+      // next, or appended to the parent's slot.
+      if (prev && prev.parent && prev.slotName) {
+        insertIntoSlotFn(prev.parent, prev.slotName, "after", movedNodes, prev);
+      } else if (next && next.parent && next.slotName) {
+        insertIntoSlotFn(next.parent, next.slotName, "before", movedNodes, next);
+      } else {
+        insertIntoSlotFn(parent, slotName, "append", movedNodes);
+      }
     }
   }
 
@@ -489,4 +501,25 @@ export function applyOperations(
       node.state[key] = value;
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// Merging
+// ---------------------------------------------------------------------------
+
+/**
+ * Concatenate several operation sets into one. Ordered operations are
+ * appended in order; state patches merge per node with later values
+ * winning. Used by the undo manager to collapse consecutive transactions.
+ */
+export function mergeOperations(...list: WireOperations[]): WireOperations {
+  const ordered: OrderedOp[] = [];
+  const state: Record<string, Record<string, unknown>> = {};
+  for (const ops of list) {
+    ordered.push(...ops.ordered);
+    for (const [nodeId, patch] of Object.entries(ops.state)) {
+      state[nodeId] = { ...(state[nodeId] ?? {}), ...patch };
+    }
+  }
+  return { ordered, state };
 }

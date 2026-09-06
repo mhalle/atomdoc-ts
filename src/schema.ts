@@ -3,7 +3,7 @@
  */
 
 import { z } from "zod";
-import type { AtomDocSchema, NodeTypeDef, ValueTypeDef } from "./types.js";
+import type { AtomDocSchema, NodeTypeDef, RefDef, ValueTypeDef } from "./types.js";
 
 export class SchemaRegistry {
   private nodeTypes: Map<string, NodeTypeDef>;
@@ -34,6 +34,16 @@ export class SchemaRegistry {
     nodeType: string,
   ): Record<string, { allowed_type: string | null }> {
     return this.nodeTypes.get(nodeType)?.slots ?? {};
+  }
+
+  /** Reference fields of a node type (tier "ref"), keyed by field name. */
+  getRefs(nodeType: string): Record<string, RefDef> {
+    return this.nodeTypes.get(nodeType)?.refs ?? {};
+  }
+
+  /** The reference declaration of one field, if it is a ref. */
+  getRef(nodeType: string, field: string): RefDef | undefined {
+    return this.nodeTypes.get(nodeType)?.refs?.[field];
   }
 
   getDefaults(nodeType: string): Record<string, unknown> {

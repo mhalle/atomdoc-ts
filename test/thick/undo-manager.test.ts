@@ -122,12 +122,12 @@ describe("UndoManager", () => {
     doc.setNodeState(doc.id, "title", "B");
     doc.setNodeState(doc.id, "title", "C");
 
-    // maxSteps=2: only first 2 inverses were kept (Hello→A, A→B)
-    // C's inverse was dropped since stack was full
+    // maxSteps=2: the oldest inverse (Hello→A) was evicted, the two
+    // newest (A→B, B→C) are kept
+    undo.undo();
+    expect(doc.root.state.title).toBe("B");
     undo.undo();
     expect(doc.root.state.title).toBe("A");
-    undo.undo();
-    expect(doc.root.state.title).toBe("Hello");
     // No more
     expect(undo.canUndo).toBe(false);
   });

@@ -8,10 +8,40 @@ import type { LocalDoc } from "./local-doc.js";
 
 export type LifecycleStage = "idle" | "update" | "change";
 
+/**
+ * Per-transaction flags, delivered to change listeners.
+ * `skipUndo` marks a transaction that must not enter undo history —
+ * typically one that applies operations received from the server.
+ */
+export interface TransactionFlags {
+  skipUndo?: boolean;
+}
+
+/**
+ * Open a transaction if the doc is idle; returns whether one was opened.
+ * A `skipUndo` transaction is always isolated: an already-open transaction
+ * is committed first, so the caller's own pending edits keep their undo
+ * entry and only the flagged work is excluded.
+ */
+function begin(doc: LocalDoc, flags?: TransactionFlags): boolean {
+  if (flags?.skipUndo && doc._lifecycleStage === "update") {
+    doc.forceCommit();
+  }
+  const isNewTx = doc._lifecycleStage === "idle";
+  if (isNewTx) {
+    doc._lifecycleStage = "update";
+  }
+  if (flags?.skipUndo) {
+    doc._transactionFlags = { skipUndo: true };
+  }
+  return isNewTx;
+}
+
 export function withTransaction(
   doc: LocalDoc,
   fn: () => void,
   isApplyOperations = false,
+  flags?: TransactionFlags,
 ): void {
   const stage = doc._lifecycleStage;
 
@@ -19,10 +49,7 @@ export function withTransaction(
     throw new Error("Cannot trigger an update during the 'change' stage");
   }
 
-  const isNewTx = stage === "idle";
-  if (isNewTx) {
-    doc._lifecycleStage = "update";
-  }
+  const isNewTx = begin(doc, flags);
 
   try {
     fn();

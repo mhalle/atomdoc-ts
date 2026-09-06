@@ -1,57 +1,119 @@
 /**
  * Stack-based undo/redo manager — port of _undo.py.
+ *
+ * Supports a merge interval (consecutive transactions collapse into one
+ * step), `skipUndo` transaction flags, and history export/import so undo
+ * state survives replacing the document with a newer snapshot.
  */
 
-import type { WireOperations } from "../types.js";
+import type { OrderedOp, WireOperations } from "../types.js";
 import type { LocalDoc, ChangeEvent } from "./local-doc.js";
+import { mergeOperations } from "./local-ops.js";
+
+export interface UndoManagerOptions {
+  /** Window in ms within which consecutive transactions merge. 0 disables. */
+  mergeInterval?: number;
+  /** Clock used for the merge interval; defaults to `Date.now`. */
+  clock?: () => number;
+}
+
+interface UndoStackItem {
+  operations: WireOperations;
+  meta: Record<string, unknown>;
+}
+
+export interface UndoHistoryItem {
+  operations: WireOperations;
+  meta: Record<string, unknown>;
+}
+
+export interface UndoHistory {
+  docId: string;
+  docType: string;
+  undoStack: UndoHistoryItem[];
+  redoStack: UndoHistoryItem[];
+  lastUpdate?: number;
+}
 
 export class UndoManager {
   private doc: LocalDoc;
   private maxSteps: number;
-  private undoStack: WireOperations[] = [];
-  private redoStack: WireOperations[] = [];
+  private mergeInterval: number;
+  private clock: () => number;
+  private undoStack: UndoStackItem[] = [];
+  private redoStack: UndoStackItem[] = [];
   private txType: "update" | "undo" | "redo" = "update";
+  private lastUpdate: number | undefined;
   private unsub: () => void;
 
-  constructor(doc: LocalDoc, maxSteps = 100) {
+  constructor(doc: LocalDoc, maxSteps = 100, options: UndoManagerOptions = {}) {
     this.doc = doc;
     this.maxSteps = maxSteps;
-    this.unsub = doc.onChange((event) => this._onChange(event));
+    this.mergeInterval = options.mergeInterval ?? 0;
+    this.clock = options.clock ?? Date.now;
+    this.unsub = this.isEnabled
+      ? doc.onChange((event) => this._onChange(event))
+      : () => {};
+  }
+
+  get isEnabled(): boolean {
+    return this.maxSteps > 0;
   }
 
   private _onChange(event: ChangeEvent): void {
+    if (event.flags?.skipUndo) return;
+    const item: UndoStackItem = { operations: event.inverseOperations, meta: {} };
     if (this.txType === "update") {
-      if (this.undoStack.length < this.maxSteps) {
-        this.undoStack.push(event.inverseOperations);
+      const now = this.clock();
+      const last = this.undoStack[this.undoStack.length - 1];
+      if (
+        last !== undefined &&
+        this.lastUpdate !== undefined &&
+        now - this.lastUpdate < this.mergeInterval
+      ) {
+        // Newest inverse first: undoing replays it before the older one.
+        last.operations = mergeOperations(item.operations, last.operations);
+      } else {
+        if (this.undoStack.length >= this.maxSteps) {
+          this.undoStack.shift();
+        }
+        this.undoStack.push(item);
       }
       this.redoStack.length = 0;
+      this.lastUpdate = now;
     } else if (this.txType === "undo") {
-      this.redoStack.push(event.inverseOperations);
+      this.redoStack.push(item);
       this.txType = "update";
     } else if (this.txType === "redo") {
-      this.undoStack.push(event.inverseOperations);
+      this.undoStack.push(item);
       this.txType = "update";
     }
   }
 
   undo(): void {
+    this.doc.forceCommit();
+    const item = this.undoStack.pop();
+    if (!item) return;
     this.txType = "undo";
-    if (this.undoStack.length === 0) {
+    this.lastUpdate = undefined;
+    try {
+      this.doc.applyOperations(item.operations);
+    } finally {
       this.txType = "update";
-      return;
     }
-    const ops = this.undoStack.pop()!;
-    this.doc.applyOperations(ops);
   }
 
   redo(): void {
+    this.doc.forceCommit();
+    const item = this.redoStack.pop();
+    if (!item) return;
     this.txType = "redo";
-    if (this.redoStack.length === 0) {
+    this.lastUpdate = undefined;
+    try {
+      this.doc.applyOperations(item.operations);
+    } finally {
       this.txType = "update";
-      return;
     }
-    const ops = this.redoStack.pop()!;
-    this.doc.applyOperations(ops);
   }
 
   get canUndo(): boolean {
@@ -62,7 +124,146 @@ export class UndoManager {
     return this.redoStack.length > 0;
   }
 
+  /** Drop all undo and redo history. */
+  clear(): void {
+    this.undoStack = [];
+    this.redoStack = [];
+    this.lastUpdate = undefined;
+  }
+
   dispose(): void {
     this.unsub();
   }
+
+  // --- History transfer ---
+
+  /**
+   * Export undo and redo state for transfer to a matching document.
+   * Pending edits are committed first so they are part of the history.
+   */
+  exportHistory(): UndoHistory {
+    this.doc.forceCommit();
+    const history: UndoHistory = {
+      docId: this.doc.id,
+      docType: this.doc.root.type,
+      undoStack: this.undoStack.map(exportItem),
+      redoStack: this.redoStack.map(exportItem),
+    };
+    if (this.lastUpdate !== undefined) history.lastUpdate = this.lastUpdate;
+    return history;
+  }
+
+  /**
+   * Replace this manager's history with a previously exported one.
+   * The document ID and root type must match, because operations
+   * reference node IDs. Stacks are truncated to `maxSteps`.
+   */
+  importHistory(history: unknown): void {
+    if (!isUndoHistory(history)) {
+      throw new TypeError("Invalid undo history");
+    }
+    if (history.docId !== this.doc.id || history.docType !== this.doc.root.type) {
+      throw new Error("Undo history belongs to a different document");
+    }
+    this.undoStack = importStack(history.undoStack, this.maxSteps);
+    this.redoStack = importStack(history.redoStack, this.maxSteps);
+    this.lastUpdate = history.lastUpdate;
+    this.txType = "update";
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function cloneOperations(ops: WireOperations): WireOperations {
+  return {
+    ordered: ops.ordered.map((op) => structuredClone(op)),
+    state: Object.fromEntries(
+      Object.entries(ops.state).map(([id, patch]) => [id, { ...patch }]),
+    ),
+  };
+}
+
+function exportItem(item: UndoStackItem): UndoHistoryItem {
+  return { operations: cloneOperations(item.operations), meta: { ...item.meta } };
+}
+
+function importStack(items: UndoHistoryItem[], maxSteps: number): UndoStackItem[] {
+  const retained = maxSteps === 0 ? [] : items.slice(-maxSteps);
+  return retained.map((item) => ({
+    operations: cloneOperations(item.operations),
+    meta: { ...item.meta },
+  }));
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isRef(value: unknown): boolean {
+  return value === 0 || typeof value === "string";
+}
+
+function isOrderedOp(value: unknown): value is OrderedOp {
+  if (!Array.isArray(value)) return false;
+  if (value[0] === 0) {
+    return (
+      value.length === 6 &&
+      Array.isArray(value[1]) &&
+      value[1].every(
+        (pair: unknown) =>
+          Array.isArray(pair) &&
+          pair.length === 2 &&
+          pair.every((p) => typeof p === "string"),
+      ) &&
+      isRef(value[2]) &&
+      typeof value[3] === "string" &&
+      isRef(value[4]) &&
+      isRef(value[5])
+    );
+  }
+  if (value[0] === 1) {
+    return value.length === 3 && typeof value[1] === "string" && isRef(value[2]);
+  }
+  if (value[0] === 2) {
+    return (
+      value.length === 7 &&
+      typeof value[1] === "string" &&
+      isRef(value[2]) &&
+      isRef(value[3]) &&
+      typeof value[4] === "string" &&
+      isRef(value[5]) &&
+      isRef(value[6])
+    );
+  }
+  return false;
+}
+
+function isOperations(value: unknown): value is WireOperations {
+  return (
+    isRecord(value) &&
+    Array.isArray(value.ordered) &&
+    value.ordered.every(isOrderedOp) &&
+    isRecord(value.state) &&
+    Object.values(value.state).every(isRecord)
+  );
+}
+
+function isHistoryItem(value: unknown): value is UndoHistoryItem {
+  return isRecord(value) && isOperations(value.operations) && isRecord(value.meta);
+}
+
+function isUndoHistory(value: unknown): value is UndoHistory {
+  return (
+    isRecord(value) &&
+    typeof value.docId === "string" &&
+    typeof value.docType === "string" &&
+    Array.isArray(value.undoStack) &&
+    value.undoStack.every(isHistoryItem) &&
+    Array.isArray(value.redoStack) &&
+    value.redoStack.every(isHistoryItem) &&
+    (value.lastUpdate === undefined ||
+      (typeof value.lastUpdate === "number" && Number.isFinite(value.lastUpdate)))
+  );
 }

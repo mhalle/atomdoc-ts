@@ -8,6 +8,7 @@
 import type {
   AtomDocSchema,
   JsonDoc,
+  RefDef,
   WireOperations,
 } from "../types.js";
 import { createDocNode, type DocNode } from "./doc-node.js";
@@ -25,18 +26,44 @@ import {
   type Diff,
 } from "./local-ops.js";
 import { iterRange, detachRange, descendantsInclusive } from "./local-range.js";
-import { withTransaction, type LifecycleStage } from "./local-transaction.js";
+import {
+  withTransaction,
+  type LifecycleStage,
+  type TransactionFlags,
+} from "./local-transaction.js";
 import { createNodeIdFactory } from "./node-id.js";
 
 export interface ChangeEvent {
   operations: WireOperations;
   inverseOperations: WireOperations;
   diff: Diff;
+  /** Flags of the committed transaction (e.g. `skipUndo`). */
+  flags: TransactionFlags;
 }
 
 function opsToWire(acc: OpsAccumulator): WireOperations {
   return { ordered: acc.ordered, state: acc.state };
 }
+
+/**
+ * A reference does not resolve, has the wrong target type, or a referenced
+ * node would be deleted. Thrown at commit; the transaction is rolled back.
+ */
+export class RefIntegrityError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RefIntegrityError";
+  }
+}
+
+/** IDs held by a reference field value (a string or an array of strings). */
+function refIds(value: unknown): string[] {
+  if (typeof value === "string") return [value];
+  if (Array.isArray(value)) return value.filter((v): v is string => typeof v === "string");
+  return [];
+}
+
+const REF_SEP = "\u0000";
 
 export class LocalDoc {
   readonly id: string;
@@ -47,10 +74,16 @@ export class LocalDoc {
   _forwardOps: OpsAccumulator = createOpsAccumulator();
   _inverseOps: OpsAccumulator = createOpsAccumulator();
   _diff: Diff = createDiff();
+  _transactionFlags: TransactionFlags = {};
 
   private schema: AtomDocSchema;
   private idGen: () => string;
   private changeListeners: Array<(e: ChangeEvent) => void> = [];
+  /**
+   * Reverse reference index: target id → set of `${referrerId}\0${field}`.
+   * Derived state — never serialized, rebuilt from a snapshot.
+   */
+  private refIndex = new Map<string, Set<string>>();
 
   constructor(schema: AtomDocSchema, snapshot: JsonDoc) {
     this.schema = schema;
@@ -67,12 +100,122 @@ export class LocalDoc {
     if (snapshot[3]) {
       this._loadSlots(this.root, snapshot[3]);
     }
+    this._rebuildRefIndex();
   }
 
   // --- Read ---
 
   getNode(id: string): DocNode | undefined {
     return this.nodeMap.get(id);
+  }
+
+  // --- References ---
+
+  /** Nodes holding a reference to `nodeId`, optionally only via `field`. */
+  referrers(nodeId: string, field?: string): DocNode[] {
+    const result: DocNode[] = [];
+    const seen = new Set<string>();
+    for (const entry of this.refIndex.get(nodeId) ?? []) {
+      const [referrerId, fieldName] = entry.split(REF_SEP);
+      if (field !== undefined && fieldName !== field) continue;
+      if (seen.has(referrerId)) continue;
+      const referrer = this.nodeMap.get(referrerId);
+      if (referrer) {
+        seen.add(referrerId);
+        result.push(referrer);
+      }
+    }
+    return result;
+  }
+
+  private _refDefsFor(type: string): Record<string, RefDef> {
+    return this.schema.node_types[type]?.refs ?? {};
+  }
+
+  private _refsAdd(node: DocNode): void {
+    for (const field of Object.keys(this._refDefsFor(node.type))) {
+      for (const targetId of refIds(node.state[field])) {
+        this._refIndexAdd(targetId, node.id, field);
+      }
+    }
+  }
+
+  private _refsRemove(node: DocNode): void {
+    for (const field of Object.keys(this._refDefsFor(node.type))) {
+      for (const targetId of refIds(node.state[field])) {
+        this._refIndexDiscard(targetId, node.id, field);
+      }
+    }
+  }
+
+  private _refsUpdate(node: DocNode, field: string, oldValue: unknown, newValue: unknown): void {
+    const oldIds = refIds(oldValue);
+    const newIds = refIds(newValue);
+    for (const id of oldIds) {
+      if (!newIds.includes(id)) this._refIndexDiscard(id, node.id, field);
+    }
+    for (const id of newIds) this._refIndexAdd(id, node.id, field);
+  }
+
+  private _refIndexAdd(targetId: string, referrerId: string, field: string): void {
+    let set = this.refIndex.get(targetId);
+    if (!set) {
+      set = new Set();
+      this.refIndex.set(targetId, set);
+    }
+    set.add(referrerId + REF_SEP + field);
+  }
+
+  private _refIndexDiscard(targetId: string, referrerId: string, field: string): void {
+    const set = this.refIndex.get(targetId);
+    if (!set) return;
+    set.delete(referrerId + REF_SEP + field);
+    if (set.size === 0) this.refIndex.delete(targetId);
+  }
+
+  private _rebuildRefIndex(): void {
+    this.refIndex.clear();
+    for (const node of this.nodeMap.values()) this._refsAdd(node);
+  }
+
+  /**
+   * Commit-time referential integrity: every reference written by an
+   * inserted or updated node must resolve to a node of the declared type,
+   * and no deleted node may still be referenced by a live one (policy
+   * "restrict").
+   */
+  private _checkRefIntegrity(): void {
+    const diff = this._diff;
+    for (const nodeId of [...diff.inserted, ...diff.updated]) {
+      const node = this.nodeMap.get(nodeId);
+      if (!node) continue;
+      for (const [field, rdef] of Object.entries(this._refDefsFor(node.type))) {
+        for (const targetId of refIds(node.state[field])) {
+          const target = this.nodeMap.get(targetId);
+          if (!target) {
+            throw new RefIntegrityError(
+              `${node.type}.${field} on node '${nodeId}' references '${targetId}', which is not in the document`,
+            );
+          }
+          if (rdef.target_type !== null && target.type !== rdef.target_type) {
+            throw new RefIntegrityError(
+              `${node.type}.${field} on node '${nodeId}' references ${target.type} '${targetId}', expected ${rdef.target_type}`,
+            );
+          }
+        }
+      }
+    }
+    for (const deletedId of diff.deleted.keys()) {
+      for (const entry of this.refIndex.get(deletedId) ?? []) {
+        const [referrerId, field] = entry.split(REF_SEP);
+        const referrer = this.nodeMap.get(referrerId);
+        if (referrer) {
+          throw new RefIntegrityError(
+            `Cannot delete node '${deletedId}': still referenced by ${referrer.type}.${field} on node '${referrerId}'`,
+          );
+        }
+      }
+    }
   }
 
   // --- Node creation ---
@@ -111,6 +254,9 @@ export class LocalDoc {
       onSetStateInverse(this._diff, this._inverseOps, node, key);
       node.state[key] = value;
       onSetStateForward(this._diff, this._forwardOps, this._inverseOps, node, key);
+      if (key in this._refDefsFor(node.type)) {
+        this._refsUpdate(node, key, current, value);
+      }
     });
   }
 
@@ -203,63 +349,122 @@ export class LocalDoc {
         this.root, start, end,
       );
 
-      // Remove from node map
+      // Remove from node map and drop the deleted nodes' own references
       for (const node of iterRange(start, end)) {
         for (const desc of descendantsInclusive(node)) {
           this.nodeMap.delete(desc.id);
+          this._refsRemove(desc);
         }
       }
     });
   }
 
+  /** Move a range to the end of `slotName` on `parentId` ("0" or "" = root). */
   moveRange(
     startId: string,
     endId: string | undefined,
     parentId: string,
     slotName: string,
   ): void {
+    const { start, end } = this._resolveRange(startId, endId);
+    const newParent = parentId === "0" || !parentId ? this.root : this.nodeMap.get(parentId);
+    if (!newParent) throw new Error(`Parent not found: ${parentId}`);
+    if (!newParent.slotFirst.has(slotName)) {
+      throw new Error(`Slot '${slotName}' does not exist on ${newParent.type}`);
+    }
+
+    withTransaction(this, () => {
+      const newPrev = newParent.slotLast.get(slotName) ?? null;
+      if (newPrev === end) return; // already there
+      this._moveRange(start, end, newParent, slotName, newPrev, null);
+    });
+  }
+
+  /** Move a range so it sits immediately before or after sibling `targetId`. */
+  moveRangeRelative(
+    startId: string,
+    endId: string | undefined,
+    targetId: string,
+    position: "before" | "after",
+  ): void {
+    const { start, end } = this._resolveRange(startId, endId);
+    const target = this.nodeMap.get(targetId);
+    if (!target) throw new Error(`Node not found: ${targetId}`);
+    const newParent = target.parent;
+    const slotName = target.slotName;
+    if (!newParent || !slotName) {
+      throw new Error("Cannot move before or after the root");
+    }
+
+    withTransaction(this, () => {
+      if (iterRange(start, end).includes(target)) {
+        throw new Error("Target is in the range");
+      }
+      if (position === "before") {
+        if (target.prevSibling === end) return;
+        this._moveRange(start, end, newParent, slotName, target.prevSibling, target);
+      } else {
+        if (target.nextSibling === start) return;
+        this._moveRange(start, end, newParent, slotName, target, target.nextSibling);
+      }
+    });
+  }
+
+  private _resolveRange(startId: string, endId: string | undefined) {
     const start = this.nodeMap.get(startId);
     if (!start) throw new Error(`Node not found: ${startId}`);
     const end = endId ? this.nodeMap.get(endId) : start;
     if (!end) throw new Error(`Node not found: ${endId ?? startId}`);
-    const newParent = parentId === "0" || !parentId ? this.root : this.nodeMap.get(parentId);
-    if (!newParent) throw new Error(`Parent not found: ${parentId}`);
+    return { start, end };
+  }
 
-    withTransaction(this, () => {
-      const newPrev = newParent.slotLast.get(slotName) ?? null;
-      onMoveRange(
-        this._diff, this._forwardOps, this._inverseOps,
-        this.root, start, end, newParent, slotName, newPrev, null,
-      );
+  private _moveRange(
+    start: DocNode,
+    end: DocNode,
+    newParent: DocNode,
+    slotName: string,
+    newPrev: DocNode | null,
+    newNext: DocNode | null,
+  ): void {
+    const range = iterRange(start, end);
+    if (range.includes(newParent)) throw new Error("Target is in the range");
+    for (let anc = newParent.parent; anc; anc = anc.parent) {
+      if (range.includes(anc)) throw new Error("Target is descendant of the range");
+    }
 
-      // Detach
-      detachRange(start, end);
+    onMoveRange(
+      this._diff, this._forwardOps, this._inverseOps,
+      this.root, start, end, newParent, slotName, newPrev, newNext,
+    );
 
-      // Re-insert (append)
-      const movedNodes = iterRange(start, end);
-      start.prevSibling = null;
-      end.nextSibling = null;
+    detachRange(start, end);
 
-      let current = newParent.slotLast.get(slotName) ?? null;
-      for (const nd of movedNodes) {
-        nd.parent = newParent;
-        nd.slotName = slotName;
-        nd.prevSibling = current;
-        nd.nextSibling = null;
-        if (current) {
-          current.nextSibling = nd;
-        } else {
-          newParent.slotFirst.set(slotName, nd);
-        }
-        current = nd;
-      }
-      newParent.slotLast.set(slotName, current);
-    });
+    start.prevSibling = newPrev;
+    if (newPrev) {
+      newPrev.nextSibling = start;
+    } else {
+      newParent.slotFirst.set(slotName, start);
+    }
+    end.nextSibling = newNext;
+    if (newNext) {
+      newNext.prevSibling = end;
+    } else {
+      newParent.slotLast.set(slotName, end);
+    }
+    for (const nd of range) {
+      nd.parent = newParent;
+      nd.slotName = slotName;
+    }
   }
 
   // --- Apply remote/inverse operations ---
 
-  applyOperations(ops: WireOperations): void {
+  /**
+   * Apply operations (remote patches or inverse ops). With
+   * `flags.skipUndo` the operations run in their own transaction that the
+   * undo manager ignores; any open transaction is committed first.
+   */
+  applyOperations(ops: WireOperations, flags?: TransactionFlags): void {
     withTransaction(
       this,
       () => {
@@ -315,9 +520,17 @@ export class LocalDoc {
               const endIdRaw = op[2];
               const parentIdRaw = op[3];
               const slotName = op[4] as string;
+              const prevIdRaw = op[5];
+              const nextIdRaw = op[6];
               const endId = endIdRaw === 0 ? undefined : String(endIdRaw);
               const parentId = parentIdRaw === 0 ? "" : String(parentIdRaw);
-              this.moveRange(startId, endId, parentId, slotName);
+              if (prevIdRaw && this.nodeMap.has(String(prevIdRaw))) {
+                this.moveRangeRelative(startId, endId, String(prevIdRaw), "after");
+              } else if (nextIdRaw && this.nodeMap.has(String(nextIdRaw))) {
+                this.moveRangeRelative(startId, endId, String(nextIdRaw), "before");
+              } else {
+                this.moveRange(startId, endId, parentId, slotName);
+              }
             }
           } catch {
             // Skip failed ops (conflict)
@@ -333,15 +546,23 @@ export class LocalDoc {
             if (isAttached) {
               onSetStateInverse(this._diff, this._inverseOps, node, key);
             }
+            const oldValue = node.state[key];
             node.state[key] = value;
             if (isAttached) {
               onSetStateForward(this._diff, this._forwardOps, this._inverseOps, node, key);
+              if (key in this._refDefsFor(node.type)) {
+                this._refsUpdate(node, key, oldValue, value);
+              }
             }
           }
         }
       },
       true, // isApplyOperations
+      flags,
     );
+    if (flags?.skipUndo && this._lifecycleStage === "update") {
+      this.forceCommit();
+    }
   }
 
   // --- Transaction lifecycle ---
@@ -362,21 +583,40 @@ export class LocalDoc {
       Object.keys(this._forwardOps.state).length > 0;
 
     if (hasChanges) {
+      // Referential integrity is a document-level check; a failure reopens
+      // the transaction so the caller (withTransaction) can roll it back.
+      try {
+        this._checkRefIntegrity();
+      } catch (e) {
+        this._lifecycleStage = "update";
+        throw e;
+      }
+
       this._lifecycleStage = "change";
       const event: ChangeEvent = {
         operations: opsToWire(this._forwardOps),
         inverseOperations: opsToWire(this._inverseOps),
         diff: this._diff,
+        flags: this._transactionFlags,
       };
-      for (const cb of [...this.changeListeners]) {
-        cb(event);
+      try {
+        for (const cb of [...this.changeListeners]) {
+          cb(event);
+        }
+      } finally {
+        this._reset();
       }
+      return;
     }
 
-    // Reset
+    this._reset();
+  }
+
+  private _reset(): void {
     this._forwardOps = createOpsAccumulator();
     this._inverseOps = createOpsAccumulator();
     this._diff = createDiff();
+    this._transactionFlags = {};
     this._lifecycleStage = "idle";
   }
 
@@ -399,10 +639,7 @@ export class LocalDoc {
         this.insertIntoSlot(parent, slot, position, nodes, target);
       },
     );
-    this._forwardOps = createOpsAccumulator();
-    this._inverseOps = createOpsAccumulator();
-    this._diff = createDiff();
-    this._lifecycleStage = "idle";
+    this._reset();
   }
 
   // --- Events ---
@@ -437,6 +674,7 @@ export class LocalDoc {
     if (this.nodeMap.has(parent.id)) {
       for (const desc of descendantsInclusive(node)) {
         this.nodeMap.set(desc.id, desc);
+        this._refsAdd(desc);
       }
     }
   }

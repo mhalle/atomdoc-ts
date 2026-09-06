@@ -1,5 +1,53 @@
 # Changelog
 
+## 0.4.0
+
+Thick-client parity with atomdoc (Python) 0.4.0, which ports the DocNode v0.4
+undo and lifecycle improvements from DocuKit. No wire protocol changes; works
+with atomdoc >= 0.3.0.
+
+### Fixed
+
+- **Remote patches polluted local undo.** `ThickAtomDocClient` applied patches
+  from other clients through the same path as local edits, so undo could
+  revert another user's change. Remote patches are now applied with
+  `{ skipUndo: true }`.
+- **Move replay lost position.** Applying a move operation (from undo/redo or
+  a remote patch) ignored the recorded `prev`/`next` siblings and always
+  appended to the target slot. Moves now land where they were recorded.
+- **Undo stack eviction was inverted.** A full stack discarded the new entry
+  instead of the oldest one.
+
+### Added
+
+- **References.** Field type `"ref"` in `defineNode` (`target`, `many`),
+  exported as tier `"ref"` plus a `refs` block, matching atomdoc 0.4.0's
+  `Ref[T]`. `SchemaRegistry.getRefs()` / `getRef()`. `LocalDoc` keeps a
+  reverse index (`referrers(nodeId, field?)`, rebuilt from the snapshot) and
+  checks referential integrity at commit: references must resolve to a node
+  of the declared type, and a referenced node cannot be deleted (policy
+  `restrict`). Violations throw `RefIntegrityError` and roll the
+  transaction back. Moving a node is not a delete.
+- **Transaction flags.** `ChangeEvent.flags` (`TransactionFlags`);
+  `LocalDoc.applyOperations(ops, { skipUndo: true })` runs operations in a
+  transaction the undo manager ignores (any open transaction is committed
+  first).
+- **Merge interval.** `new UndoManager(doc, maxSteps, { mergeInterval })` and
+  `ThickClientOptions.mergeInterval` (ms) collapse consecutive local
+  transactions into one undo step. Off by default.
+- **Undo history transfer.** `undoManager.exportHistory()` /
+  `importHistory()` move undo and redo state between documents with the same
+  ID and root type — for example when a newer snapshot replaces the document.
+- `LocalDoc.moveRangeRelative(startId, endId, targetId, "before" | "after")`
+  and `ThickAtomDocClient.moveNodeRelative(nodeId, targetId, position)`.
+- `mergeOperations(...ops)`, `UndoManager.clear()`, `UndoManager.isEnabled`
+  (`maxSteps: 0` disables undo).
+
+### Changed
+
+- `LocalDoc.moveRange` is a no-op (no change event) when the range is
+  already at the end of the target slot, and validates that the slot exists.
+
 ## 0.3.0
 
 ### Breaking Changes

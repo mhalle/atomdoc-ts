@@ -132,11 +132,28 @@ export type ClientMsg = OpMsg | CreateMsg | UndoMsg | RedoMsg;
 // Schema types (from atomdoc_schema())
 // ---------------------------------------------------------------------------
 
+/**
+ * A reference field: the state value is the target node's ID (or an array
+ * of IDs when `many`). References are association, not ownership — the
+ * target lives in some slot and is never deleted through the reference.
+ */
+export interface RefDef {
+  /** Node type the reference must point at, or null for any node. */
+  target_type: string | null;
+  /** `list[Ref[T]]` in Python: the value is an array of IDs. */
+  many: boolean;
+  /** Delete policy. `"restrict"`: a referenced node cannot be deleted. */
+  policy: "restrict";
+}
+
 export interface NodeTypeDef {
   json_schema: Record<string, unknown>;
+  /** Field name → "mergeable" | "atomic" | "opaque" | "ref". */
   field_tiers: Record<string, string>;
   slots: Record<string, { allowed_type: string | null }>;
   field_defaults: Record<string, unknown>;
+  /** Reference fields (tier "ref"), keyed by field name. */
+  refs?: Record<string, RefDef>;
 }
 
 export interface ValueTypeDef {

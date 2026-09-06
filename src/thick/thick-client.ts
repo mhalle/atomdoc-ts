@@ -24,7 +24,10 @@ import { UndoManager } from "./undo-manager.js";
 
 export interface ThickClientOptions {
   url: string;
+  /** Undo steps to keep; 0 disables undo. Default 100. */
   maxUndoSteps?: number;
+  /** Merge consecutive local transactions within this many ms into one undo step. Default 0. */
+  mergeInterval?: number;
 }
 
 export class ThickAtomDocClient {
@@ -37,6 +40,7 @@ export class ThickAtomDocClient {
   private version = 0;
   private url: string;
   private maxUndoSteps: number;
+  private mergeInterval: number;
   private clientId: string = crypto.randomUUID();
 
   private bridgeUnsub: (() => void) | null = null;
@@ -55,6 +59,7 @@ export class ThickAtomDocClient {
   constructor(options: ThickClientOptions) {
     this.url = options.url;
     this.maxUndoSteps = options.maxUndoSteps ?? 100;
+    this.mergeInterval = options.mergeInterval ?? 0;
   }
 
   // --- Lifecycle ---
@@ -160,6 +165,16 @@ export class ThickAtomDocClient {
     this.doc.moveRange(nodeId, undefined, parentId, slot);
   }
 
+  /** Move a node so it sits immediately before or after sibling `targetId`. */
+  moveNodeRelative(
+    nodeId: string,
+    targetId: string,
+    position: "before" | "after",
+  ): void {
+    if (!this.doc) throw new Error("Not connected");
+    this.doc.moveRangeRelative(nodeId, undefined, targetId, position);
+  }
+
   undo(steps = 1): void {
     if (!this.undoMgr) return;
     for (let i = 0; i < steps; i++) {
@@ -237,7 +252,9 @@ export class ThickAtomDocClient {
 
     this.version = version;
     this.doc = new LocalDoc(this.rawSchema, snapshot);
-    this.undoMgr = new UndoManager(this.doc, this.maxUndoSteps);
+    this.undoMgr = new UndoManager(this.doc, this.maxUndoSteps, {
+      mergeInterval: this.mergeInterval,
+    });
     this.bridgeUnsub = bridgeDocToStore(this.doc, this.store);
 
     // Forward local changes to server (skip if we're applying a remote patch)
@@ -257,11 +274,12 @@ export class ThickAtomDocClient {
       // Self-echo: already applied locally, just update version
       this.pendingOps.shift();
     } else {
-      // Remote change: apply to local doc (flag to prevent re-sending)
+      // Remote change: apply to local doc (flag to prevent re-sending,
+      // skipUndo so another user's edits never enter local undo history)
       if (this.doc) {
         this.applyingRemote = true;
         try {
-          this.doc.applyOperations(msg.operations);
+          this.doc.applyOperations(msg.operations, { skipUndo: true });
         } finally {
           this.applyingRemote = false;
         }

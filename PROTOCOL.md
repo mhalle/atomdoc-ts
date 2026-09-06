@@ -98,8 +98,26 @@ Sent once on connect. Contains the full document schema.
     - `"mergeable"` — independent fields, concurrent edits to different fields merge cleanly
     - `"atomic"` — frozen value, replaced as a unit (e.g., Color)
     - `"opaque"` — binary data (bytes), base64 encoded
+    - `"ref"` — a reference to another node in the same document; the value is that node's ID (or an array of IDs)
   - `slots` — named ordered child collections, with allowed child type
   - `field_defaults` — default values for fields
+  - `refs` — reference fields (tier `"ref"`), keyed by field name:
+    - `target_type` — node type the reference must point at, or `null` for any
+    - `many` — `true` when the value is an array of IDs
+    - `policy` — delete policy; `"restrict"` means a node that is still referenced cannot be deleted
+
+    ```json
+    "refs": { "transform": { "target_type": "Transform", "many": false, "policy": "restrict" } }
+    ```
+
+    A reference is association, not ownership: the target lives in a slot
+    somewhere and is never deleted through the reference. The schema
+    describes the field's shape; the *document* enforces integrity at commit
+    (every reference resolves to a node of the declared type; deleting a
+    referenced node fails). A thick client should keep a reverse index and
+    run the same check locally so a violating transaction is rolled back
+    before it is sent. The server rejects one that slips through with an
+    `error` (`invalid_op`) and does not broadcast it.
 - `value_types` — frozen compound types (like Color) that are replaced atomically
 - `root_type` — the type name of the root node
 
@@ -272,7 +290,9 @@ Values are **native JSON** — strings, numbers, booleans, arrays, objects, or `
 
 **Opaque fields** (tier `"opaque"`): the value is a JSON string containing base64-encoded bytes. The receiver decodes based on the field's schema tier (not on the shape of the value).
 
-To apply: use the value as-is for mergeable/atomic fields; `base64` decode for opaque fields.
+**Reference fields** (tier `"ref"`): the value is a node ID string, an array of ID strings (`many`), or `null`. Nothing is resolved on the wire; the receiver looks the ID up in its own node map.
+
+To apply: use the value as-is for mergeable/atomic/ref fields; `base64` decode for opaque fields.
 
 ### The `0` Sentinel
 
@@ -506,29 +526,46 @@ withTransaction(doc, fn):
 
 #### 10. UndoManager
 
-```
-UndoManager:
-  undoStack: list of WireOperations
-  redoStack: list of WireOperations
-  txType: "update" | "undo" | "redo"
+Every change event carries the flags of the committed transaction
+(`flags.skipUndo`). Operations received from the server are applied with
+`skipUndo` so they never enter this client's undo history; a `skipUndo`
+transaction is isolated (an open transaction is committed first).
 
-  on doc.onChange:
-    if txType == "update": push inverseOps to undoStack, clear redoStack
+```
+UndoManager(doc, maxSteps = 100, { mergeInterval = 0, clock = Date.now }):
+  undoStack: list of { operations: WireOperations, meta }
+  redoStack: list of { operations: WireOperations, meta }
+  txType: "update" | "undo" | "redo"
+  lastUpdate: timestamp of the last recorded local transaction
+
+  on doc.onChange(event):
+    if event.flags.skipUndo: return
+    if txType == "update":
+      if lastUpdate is set and clock() - lastUpdate < mergeInterval:
+        merge inverseOps into the top undo item (newest inverse first)
+      else:
+        if undoStack is full: drop the OLDEST item
+        push inverseOps to undoStack
+      clear redoStack; lastUpdate = clock()
     if txType == "undo": push inverseOps to redoStack
     if txType == "redo": push inverseOps to undoStack
 
   undo():
-    txType = "undo"
-    pop from undoStack
+    doc.forceCommit()
+    pop from undoStack; txType = "undo"; lastUpdate = unset
     doc.applyOperations(popped)
     # onChange fires, pushes to redoStack
 
   redo():
-    txType = "redo"
-    pop from redoStack
-    doc.applyOperations(popped)
-    # onChange fires, pushes to undoStack
+    same with redoStack / txType = "redo"
+
+  exportHistory() -> { docId, docType, undoStack, redoStack, lastUpdate? }
+  importHistory(history):   # docId and docType must match; truncated to maxSteps
 ```
+
+Replaying a move operation must honor its `prev_id` / `next_id` (after
+prev, else before next, else append), otherwise undoing a move that landed
+mid-slot restores it at the end.
 
 #### 11. Store Bridge
 

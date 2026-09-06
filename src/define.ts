@@ -20,6 +20,8 @@
  *
  *   const Page = defineNode("Page", {
  *     title: { type: "string", default: "" },
+ *     // A reference to another node in the same document (stored as its ID)
+ *     cover: { type: "ref", target: "Annotation", default: null },
  *   }, {
  *     slots: { annotations: "Annotation" },
  *   });
@@ -27,7 +29,7 @@
  *   const schema = buildSchema("Page", [Page, Annotation], [Color]);
  */
 
-import type { AtomDocSchema, NodeTypeDef, ValueTypeDef } from "./types.js";
+import type { AtomDocSchema, NodeTypeDef, RefDef, ValueTypeDef } from "./types.js";
 
 // ---------------------------------------------------------------------------
 // Field definition
@@ -39,18 +41,26 @@ export type FieldType =
   | "number"
   | "boolean"
   | "object"
-  | "array";
+  | "array"
+  | "ref";
 
 export interface FieldDef {
   type: FieldType;
   /** Default value for this field. */
   default?: unknown;
-  /** Tier: "mergeable" (default), "atomic", or "opaque". */
-  tier?: "mergeable" | "atomic" | "opaque";
+  /**
+   * Tier: "mergeable" (default), "atomic", or "opaque". A `"ref"` field is
+   * always tier "ref".
+   */
+  tier?: "mergeable" | "atomic" | "opaque" | "ref";
   /** For object fields: a ValueDef or NodeDef to reference. */
   schema?: ValueDef;
   /** For array fields: item type. */
   items?: FieldDef;
+  /** For ref fields: the node type the reference must point at (null = any). */
+  target?: string | null;
+  /** For ref fields: the value is an array of node IDs. */
+  many?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -102,6 +112,15 @@ export function defineNode(
 // ---------------------------------------------------------------------------
 
 function fieldToJsonSchema(field: FieldDef): Record<string, unknown> {
+  if (field.type === "ref") {
+    // A reference is a node ID on the wire.
+    const result: Record<string, unknown> = field.many
+      ? { type: "array", items: { type: "string" } }
+      : { type: "string" };
+    if (field.default !== undefined) result.default = field.default;
+    return result;
+  }
+
   const result: Record<string, unknown> = { type: field.type };
 
   if (field.default !== undefined) {
@@ -126,10 +145,20 @@ function nodeDefToTypeDef(node: NodeDef): NodeTypeDef {
   const properties: Record<string, Record<string, unknown>> = {};
   const fieldTiers: Record<string, string> = {};
   const fieldDefaults: Record<string, unknown> = {};
+  const refs: Record<string, RefDef> = {};
 
   for (const [name, field] of Object.entries(node.fields)) {
     properties[name] = fieldToJsonSchema(field);
-    fieldTiers[name] = field.tier ?? "mergeable";
+    if (field.type === "ref") {
+      fieldTiers[name] = "ref";
+      refs[name] = {
+        target_type: field.target ?? null,
+        many: field.many ?? false,
+        policy: "restrict",
+      };
+    } else {
+      fieldTiers[name] = field.tier ?? "mergeable";
+    }
     if (field.default !== undefined) {
       fieldDefaults[name] = field.default;
     }
@@ -145,6 +174,7 @@ function nodeDefToTypeDef(node: NodeDef): NodeTypeDef {
     field_tiers: fieldTiers,
     slots,
     field_defaults: fieldDefaults,
+    refs,
   };
 }
 
