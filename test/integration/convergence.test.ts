@@ -99,6 +99,30 @@ async function runScenario(mode: "disjoint" | "overlap", port: number, seed: num
   await client.connect();
   await connected;
 
+  // Invariant, checked after every patch: a field with a pending local
+  // write shows the newest pending value. A remote write underneath it
+  // must never surface (the server's final value is ours).
+  const violations: string[] = [];
+  const pending = client as unknown as {
+    pendingOps: Array<{ ops: { state: Record<string, Record<string, unknown>> } }>;
+  };
+  client.onPatch((version) => {
+    const expected = new Map<string, unknown>();
+    for (const entry of pending.pendingOps) {
+      for (const [nodeId, patch] of Object.entries(entry.ops.state)) {
+        for (const [key, value] of Object.entries(patch)) expected.set(`${nodeId}/${key}`, value);
+      }
+    }
+    for (const [path, value] of expected) {
+      const [nodeId, key] = path.split("/");
+      const node = client.getDoc()!.getNode(nodeId);
+      if (!node) continue; // deleted remotely: our op will be rejected
+      if (JSON.stringify(node.state[key]) !== JSON.stringify(value)) {
+        violations.push(`v${version} ${path}: ${JSON.stringify(node.state[key])} != ${JSON.stringify(value)}`);
+      }
+    }
+  });
+
   // The user edits while the device runs. In disjoint mode the user owns
   // `label` and its own nodes; in overlap mode it also writes `shared`
   // and deletes device nodes.
@@ -149,6 +173,7 @@ async function runScenario(mode: "disjoint" | "overlap", port: number, seed: num
   expect(doc().root.state.device_done, context).toBe(true);
   expect(client.getVersion(), context).toBe(server.version);
   expect(local, context).toEqual(server.data);
+  expect(violations, context).toEqual([]);
   expect(userOps).toBeGreaterThan(0);
   expect((server.data[2] as { device_commits: number }).device_commits).toBe(80);
   client.disconnect();

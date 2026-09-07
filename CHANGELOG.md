@@ -62,6 +62,12 @@ with atomdoc >= 0.3.0.
   (`test/integration/convergence.test.ts`) drives a real thick client
   against the real Python session while a fake device commits host-side
   changes, with disjoint and overlapping ownership of fields and nodes.
+  A remote write to a field (or a move of a node) that a pending local
+  edit also touches is masked rather than applied, since the server's
+  final state is the local edit's; the undo entry for that edit is
+  refreshed so undoing it reveals the remote value (`UndoManager.
+  refreshOriginal`). The harness checks on every patch that a field with
+  a pending write shows the pending value.
 - **Another client's acknowledgement could retire this client's pending
   work.** Refs were `op-N` in every client, and a patch's `ref` was
   matched before its source was checked. Refs are now

@@ -660,12 +660,26 @@ sending anything back:
   inserted there instead;
 - each move in the echo replays as it is; deletes need nothing.
 
-This converges every interleaving of one client with host-side changes
-(a device writing into the session's document) and covers most
-two-client interleavings. What it does not do is rebase later pending
-edits over an intervening remote change to the *same* field: the client
-shows the remote value until its own echo arrives. Applications where
-devices and users own disjoint fields never hit that window.
+**Masking remote writes under pending edits.** The mirror image: a
+remote patch that arrives while one of our ops is pending was committed
+before that op, so for a field both wrote the server's final value is
+ours, and the remote value is only an intermediate the server passed
+through. Applying it would show the wrong value until our echo arrived.
+So before applying a remote patch, drop every state entry whose node and
+field a pending op also writes, and every move of a node a pending op
+also moves. If the server rejects our op instead, the resync snapshot
+brings the remote value in.
+
+A masked write still matters to undo: undoing our edit should leave the
+field at what others last wrote, not at what we saw before editing. The
+client refreshes the recorded original of the oldest pending edit of
+that field to the masked value, in the undo entry that edit landed in
+(merged entries included).
+
+Together, reconciliation and masking converge every interleaving of one
+client with host-side changes (a device writing into the session's
+document) and of several clients under the server's total order, with
+no transient state the server did not itself pass through.
 
 #### 13. Remote Echo Guard
 

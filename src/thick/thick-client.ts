@@ -77,8 +77,12 @@ export class ThickAtomDocClient {
   private bridgeUnsub: (() => void) | null = null;
   private docUnsub: (() => void) | null = null;
   private online = false;
-  /** Sent, not yet echoed or rejected; matched by `ref`. */
-  private pendingOps: Array<{ ref: string; ops: WireOperations }> = [];
+  /**
+   * Sent, not yet echoed or rejected; matched by `ref`. `inverse` is the
+   * event's inverse (the object the undo manager holds too), refreshed
+   * when a remote write underneath is masked.
+   */
+  private pendingOps: Array<{ ref: string; ops: WireOperations; inverse: WireOperations }> = [];
   private bufferedOps: WireOperations[] = [];
   private applyingRemote = false;
   private nextRef = 1;
@@ -368,7 +372,7 @@ export class ThickAtomDocClient {
     // Forward local changes to server (skip if we're applying a remote patch)
     this.docUnsub = this.doc.onChange((event) => {
       if (!this.applyingRemote) {
-        this._sendOps(event.operations);
+        this._sendOps(event.operations, event.inverseOperations);
       }
     });
 
@@ -410,9 +414,11 @@ export class ThickAtomDocClient {
       // server holds, and each node we inserted is moved to the
       // neighbours the server placed it between. That converges the
       // local document on the server's order. A later pending edit of
-      // ours on the same field is restored by its own echo. Nothing
-      // here is sent back or undoable.
-      const reconcile = echoReconcileOps(this.doc!, msg.operations);
+      // ours on the same field must not be overwritten by this older
+      // value, so the echo is masked by the ops still pending (all later
+      // than it) before it is replayed. Nothing here is sent back or
+      // undoable.
+      const reconcile = this._maskPending(echoReconcileOps(this.doc!, msg.operations), false);
       if (this.doc && (reconcile.ordered.length > 0 || Object.keys(reconcile.state).length > 0)) {
         this.applyingRemote = true;
         try {
@@ -423,14 +429,15 @@ export class ThickAtomDocClient {
       }
     } else {
       // Remote change — or our own op echoed after a resync dropped the
-      // pending list (the snapshot predates it), or a commit the server
-      // normalized, either of which must be applied.
+      // pending list (the snapshot predates it), which must be applied.
       // Apply to local doc (flag to prevent re-sending, skipUndo so
-      // another user's edits never enter local undo history)
+      // another user's edits never enter local undo history). Writes
+      // that a pending local edit covers are masked: see _maskPending.
       if (this.doc) {
+        const ops = this._maskPending(msg.operations);
         this.applyingRemote = true;
         try {
-          this.doc.applyOperations(msg.operations, { skipUndo: true });
+          this.doc.applyOperations(ops, { skipUndo: true });
         } finally {
           this.applyingRemote = false;
         }
@@ -440,12 +447,59 @@ export class ThickAtomDocClient {
     for (const cb of this.patchCallbacks) cb(msg.version);
   }
 
-  private _sendOps(ops: WireOperations): void {
+  /**
+   * Drop from a remote patch what a pending local edit will overwrite.
+   *
+   * The server orders everything, and a remote patch that reaches us
+   * before our own echo was committed before our pending op. So for a
+   * field (or a moved node) both touched, the server's final state is
+   * ours; the remote value is an intermediate the server itself passed
+   * through. Applying it would show the wrong value until our echo
+   * arrived. Masking keeps the local document at what the server will
+   * hold. If the server rejects our op instead, the resync snapshot
+   * brings the remote value in.
+   *
+   * A masked write still matters to undo: undoing our edit should leave
+   * the field at what others last wrote, not at what we saw before
+   * editing. With `refreshUndo`, the oldest pending edit of that field
+   * gets its inverse refreshed to the masked value, and the undo
+   * manager's entry for it along with it. An echo of our own older write
+   * masked under a newer one is not "what others wrote": no refresh.
+   */
+  private _maskPending(remote: WireOperations, refreshUndo = true): WireOperations {
+    if (this.pendingOps.length === 0) return remote;
+    const pendingMoves = new Set<string>();
+    for (const entry of this.pendingOps) {
+      for (const op of entry.ops.ordered) {
+        if (op[0] === 2) pendingMoves.add(op[1]);
+      }
+    }
+    const ordered = remote.ordered.filter((op) => !(op[0] === 2 && pendingMoves.has(op[1])));
+    const state: WireOperations["state"] = {};
+    for (const [nodeId, patch] of Object.entries(remote.state)) {
+      const kept: Record<string, unknown> = {};
+      for (const [key, value] of Object.entries(patch)) {
+        const oldest = this.pendingOps.find((e) => nodeId in e.ops.state && key in e.ops.state[nodeId]);
+        if (!oldest) {
+          kept[key] = value;
+          continue;
+        }
+        if (!refreshUndo) continue;
+        if (!oldest.inverse.state[nodeId]) oldest.inverse.state[nodeId] = {};
+        oldest.inverse.state[nodeId][key] = value;
+        this.undoMgr?.refreshOriginal(oldest.inverse, nodeId, key, value);
+      }
+      if (Object.keys(kept).length > 0) state[nodeId] = kept;
+    }
+    return { ordered, state };
+  }
+
+  private _sendOps(ops: WireOperations, inverse: WireOperations): void {
     if (this.online && this.ws) {
       // Unique across clients: the server-assigned client ID plus a
       // counter. A ref is what ties a patch back to a pending op.
       const ref = `${this.clientId}:${this.nextRef++}`;
-      this.pendingOps.push({ ref, ops });
+      this.pendingOps.push({ ref, ops, inverse });
       this._send({
         type: "op",
         ref,

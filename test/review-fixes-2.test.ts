@@ -425,9 +425,12 @@ describe("second review: thick client", () => {
       const [op1] = sentOps(ws);
       ws.deliver({
         type: "patch", version: 1, source_client: null, ref: null,
-        operations: { ordered: [], state: { a: { name: "theirs" } } },
+        operations: { ordered: [], state: { a: { name: "theirs" }, b: { name: "b2" } } },
       });
-      expect(c.getDoc()!.getNode("a")!.state.name).toBe("theirs");
+      // The remote write to a field we have pending is masked: the local
+      // document never shows "theirs". Other fields apply.
+      expect(c.getDoc()!.getNode("a")!.state.name).toBe("mine");
+      expect(c.getDoc()!.getNode("b")!.state.name).toBe("b2");
       ws.deliver({
         type: "patch", version: 2, source_client: "me", ref: op1.ref,
         operations: { ordered: [], state: { a: { name: "mine" } } },
@@ -436,11 +439,20 @@ describe("second review: thick client", () => {
       expect(c.getStore().getNode("a")!.state.name).toBe("mine");
       expect(sentOps(ws).length).toBe(1); // the reconcile is not sent back
       expect(c.getUndoManager()!.canUndo).toBe(true); // and not a new undo step
+      // Undoing our edit reveals what the other party wrote underneath,
+      // not what we saw before editing.
+      c.undo();
+      expect(c.getDoc()!.getNode("a")!.state.name).toBe("theirs");
+      expect(sentOps(ws).length).toBe(2);
+      ws.deliver({
+        type: "patch", version: 3, source_client: "me", ref: sentOps(ws)[1].ref,
+        operations: { ordered: [], state: { a: { name: "theirs" } } },
+      });
 
       // Ordering: we append "u" after "d"; the device appended "x" after
       // "d" first, so the server placed "u" between "d" and "x".
       const uId = c.createNode("Item", { name: "u" }, c.getDoc()!.root.id, "children");
-      const [, op2] = sentOps(ws);
+      const op2 = sentOps(ws).at(-1)!;
       ws.deliver({
         type: "patch", version: 3, source_client: null, ref: null,
         operations: { ordered: [[0, [["x", "Item"]], 0, "children", "d", 0]], state: {} },
@@ -454,11 +466,11 @@ describe("second review: thick client", () => {
         operations: { ordered: [[0, [[uId, "Item"]], 0, "children", "d", "x"]], state: { [uId]: { name: "u" } } },
       });
       expect(ids(c.getDoc()!)).toEqual(["a", "b", "c", "d", uId, "x"]);
-      expect(sentOps(ws).length).toBe(2);
+      expect(sentOps(ws).length).toBe(3); // mine, the undo, the insert
       expect((c as unknown as { pendingOps: unknown[] }).pendingOps).toEqual([]);
       // A node a server-side normalizer added alongside ours is inserted.
       c.setField("a", "name", "again");
-      const [, , op3] = sentOps(ws);
+      const op3 = sentOps(ws).at(-1)!;
       ws.deliver({
         type: "patch", version: 5, source_client: null, ref: op3.ref,
         operations: {
@@ -468,6 +480,54 @@ describe("second review: thick client", () => {
       });
       expect(ids(c.getDoc()!)).toEqual(["norm", "a", "b", "c", "d", uId, "x"]);
       expect(c.getDoc()!.getNode("norm")!.state.name).toBe("n");
+    });
+  });
+
+  it("masks under merged undo entries and pending moves", async () => {
+    await withFakeWebSocket(async () => {
+      const c = new ThickAtomDocClient({ url: "ws://x", mergeInterval: 1_000_000 });
+      const p = c.connect();
+      const ws = FakeWS.instances[0];
+      ws.onopen?.();
+      await p;
+      boot(ws);
+      // Two pending writes to the same field, merged into one undo step,
+      // plus a pending move of "d" to the front.
+      c.setField("a", "name", "first");
+      c.setField("a", "name", "second");
+      c.moveNodeRelative("d", "a", "before");
+      expect(ids(c.getDoc()!)).toEqual(["d", "a", "b", "c"]);
+      const [op1, op2, op3] = sentOps(ws);
+      ws.deliver({
+        type: "patch", version: 1, source_client: null, ref: null,
+        operations: {
+          ordered: [[2, "d", 0, 0, "children", "b", "c"]], // remote moved d after b
+          state: { a: { name: "remote" } },
+        },
+      });
+      // Both the write and the move are masked: our pending edits win on
+      // the server, so the local document already shows the outcome.
+      expect(c.getDoc()!.getNode("a")!.state.name).toBe("second");
+      expect(ids(c.getDoc()!)).toEqual(["d", "a", "b", "c"]);
+      // The echo of the older write does not overwrite the newer pending one.
+      ws.deliver({
+        type: "patch", version: 2, source_client: "me", ref: op1.ref,
+        operations: { ordered: [], state: { a: { name: "first" } } },
+      });
+      expect(c.getDoc()!.getNode("a")!.state.name).toBe("second");
+      ws.deliver({
+        type: "patch", version: 3, source_client: "me", ref: op2.ref,
+        operations: { ordered: [], state: { a: { name: "second" } } },
+      });
+      ws.deliver({
+        type: "patch", version: 4, source_client: "me", ref: op3.ref,
+        operations: { ordered: [[2, "d", 0, 0, "children", 0, "a"]], state: {} },
+      });
+      expect((c as unknown as { pendingOps: unknown[] }).pendingOps).toEqual([]);
+      expect(c.getDoc()!.getNode("a")!.state.name).toBe("second");
+      // The merged undo step restores the field to the remote's value.
+      c.undo();
+      expect(c.getDoc()!.getNode("a")!.state.name).toBe("remote");
     });
   });
 

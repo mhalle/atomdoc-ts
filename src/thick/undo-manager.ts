@@ -20,6 +20,12 @@ export interface UndoManagerOptions {
 interface UndoStackItem {
   operations: WireOperations;
   meta: Record<string, unknown>;
+  /**
+   * The inverse objects (as delivered by change events) this item was
+   * built from: one, or several when transactions merged. Lets a caller
+   * that holds an event's inverse find the item it landed in.
+   */
+  sources?: WireOperations[];
 }
 
 export interface UndoHistoryItem {
@@ -62,7 +68,11 @@ export class UndoManager {
 
   private _onChange(event: ChangeEvent): void {
     if (event.flags?.skipUndo) return;
-    const item: UndoStackItem = { operations: event.inverseOperations, meta: {} };
+    const item: UndoStackItem = {
+      operations: event.inverseOperations,
+      meta: {},
+      sources: [event.inverseOperations],
+    };
     if (this.txType === "update") {
       const now = this.clock();
       const last = this.undoStack[this.undoStack.length - 1];
@@ -73,6 +83,7 @@ export class UndoManager {
       ) {
         // Newest inverse first: undoing replays it before the older one.
         last.operations = mergeOperations(item.operations, last.operations);
+        (last.sources ??= []).push(item.operations);
       } else {
         if (this.undoStack.length >= this.maxSteps) {
           this.undoStack.shift();
@@ -124,6 +135,25 @@ export class UndoManager {
     } finally {
       this.txType = "update";
     }
+  }
+
+  /**
+   * Replace the recorded original of one field in the entry built from
+   * `source` (an inverse a change event delivered). Used when a remote
+   * write to that field was masked under a pending local edit: undoing
+   * the edit should reveal what others last wrote, not what this client
+   * saw before editing. Returns whether an entry was found.
+   */
+  refreshOriginal(source: WireOperations, nodeId: string, key: string, value: unknown): boolean {
+    for (const stack of [this.undoStack, this.redoStack]) {
+      for (const item of stack) {
+        if (item.operations !== source && !item.sources?.includes(source)) continue;
+        const patch = item.operations.state[nodeId];
+        if (patch && key in patch) patch[key] = value;
+        return true;
+      }
+    }
+    return false;
   }
 
   get canUndo(): boolean {
