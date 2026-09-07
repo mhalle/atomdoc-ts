@@ -405,7 +405,7 @@ client.onOnline(() => { ... });        // reconnected
 
 #### Offline Behavior
 
-When the connection drops, all operations continue to work locally. The UI stays responsive. Operations are buffered and sent when the connection is restored.
+When the connection drops, all operations continue to work locally. The UI stays responsive. Operations are buffered — including any that were sent but not yet acknowledged when the socket dropped — and replayed in order once the reconnect snapshot has landed; `onOnline` fires after that replay, so it sees the resynced document. An edit the server then rejects comes back as a resync (`onResync`).
 
 ```ts
 client.onOffline(() => {
@@ -664,7 +664,7 @@ See [PROTOCOL.md](PROTOCOL.md) for the full wire protocol specification.
 |---------|--------|------|
 | `schema` | `schema: AtomDocSchema` | On connect |
 | `snapshot` | `doc_id`, `version`, `data: JsonDoc` | On connect, after schema |
-| `patch` | `version`, `operations: WireOperations`, `source_client` | After each commit |
+| `patch` | `version`, `operations: WireOperations`, `source_client` (set only for the verbatim echo of that client's `op`), `ref` (the request's `ref`) | After each commit |
 | `error` | `ref?`, `code`, `message` | On invalid operation |
 
 ### Client -> Server

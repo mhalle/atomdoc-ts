@@ -12,7 +12,7 @@ import type {
   RefDef,
   WireOperations,
 } from "../types.js";
-import { createDocNode, type DocNode } from "./doc-node.js";
+import { createDocNode, resetDocNode, type DocNode } from "./doc-node.js";
 import {
   createOpsAccumulator,
   createDiff,
@@ -65,6 +65,25 @@ function refIds(value: unknown): string[] {
 
 const REF_SEP = "\u0000";
 
+function copyState(
+  state: Record<string, Record<string, unknown>>,
+): Record<string, Record<string, unknown>> {
+  return Object.fromEntries(
+    Object.entries(state).map(([id, patch]) => [id, { ...patch }]),
+  );
+}
+
+/** Whether `field` is declared as a mapping (`dict[str, T]`) by the schema. */
+function isMapField(jsonSchema: Record<string, unknown> | undefined, field: string): boolean {
+  const props = jsonSchema?.properties as Record<string, Record<string, unknown>> | undefined;
+  const prop = props?.[field];
+  if (!prop) return false;
+  const candidates = [prop, ...((prop.anyOf as Record<string, unknown>[] | undefined) ?? [])];
+  return candidates.some(
+    (c) => c.type === "object" && !c.properties && typeof c.additionalProperties === "object",
+  );
+}
+
 export class LocalDoc {
   readonly id: string;
   readonly root: DocNode;
@@ -79,6 +98,15 @@ export class LocalDoc {
   private schema: AtomDocSchema;
   private idGen: () => string;
   private changeListeners: Array<(e: ChangeEvent) => void> = [];
+  private rollbackListeners: Array<() => void> = [];
+  /** Set while change listeners run for a commit, cleared when it is done. */
+  private changeNotified = false;
+  /**
+   * Nodes removed from the document, by ID, for as long as someone still
+   * holds them. A rollback or undo that re-inserts the same ID revives
+   * the object, so a handle survives the round trip.
+   */
+  private graveyard = new Map<string, WeakRef<DocNode>>();
   /**
    * Reverse reference index: target id → set of `${referrerId}\0${field}`.
    * Derived state — never serialized, rebuilt from a snapshot.
@@ -151,14 +179,27 @@ export class LocalDoc {
       const defs: Record<string, HandleDef> = this.schema.node_types[node.type]?.handles ?? {};
       for (const [field, def] of Object.entries(defs)) {
         if (strength !== undefined && def.strength !== strength) continue;
+        const walk = (value: unknown): void => {
+          if (Array.isArray(value)) {
+            for (const item of value) walk(item);
+          } else if (value && typeof value === "object") {
+            result.push({
+              node,
+              field,
+              handle: value as Record<string, unknown>,
+              strength: def.strength,
+            });
+          }
+        };
         const value = node.state[field];
-        if (value && typeof value === "object" && !Array.isArray(value)) {
-          result.push({
-            node,
-            field,
-            handle: value as Record<string, unknown>,
-            strength: def.strength,
-          });
+        // A handle field holds one handle, a list of them, or a map of
+        // them; the values of a map are handles, the map itself is not.
+        const tier = this.schema.node_types[node.type]?.json_schema;
+        const isMap = isMapField(tier, field);
+        if (isMap && value && typeof value === "object" && !Array.isArray(value)) {
+          for (const item of Object.values(value as Record<string, unknown>)) walk(item);
+        } else {
+          walk(value);
         }
       }
     }
@@ -258,11 +299,13 @@ export class LocalDoc {
   // --- Node creation ---
 
   createNode(type: string, state?: Record<string, unknown>): DocNode {
+    if (!this.schema.node_types[type]) throw new Error(`Unknown node type: ${type}`);
     const id = this.idGen();
     const slotOrder = this._slotOrderFor(type);
     const node = createDocNode(id, type, slotOrder);
     if (state) {
       for (const [k, v] of Object.entries(state)) {
+        this._checkField(type, k);
         node.state[k] = v;
       }
     }
@@ -283,6 +326,7 @@ export class LocalDoc {
   setNodeState(nodeId: string, key: string, value: unknown): void {
     const node = this.nodeMap.get(nodeId);
     if (!node) throw new Error(`Node not found: ${nodeId}`);
+    this._checkField(node.type, key);
 
     withTransaction(this, () => {
       const current = node.state[key];
@@ -307,6 +351,19 @@ export class LocalDoc {
     if (nodes.length === 0) return;
 
     withTransaction(this, () => {
+      if (!parent.slotFirst.has(slotName)) {
+        throw new Error(`Slot '${slotName}' does not exist on ${parent.type}`);
+      }
+      // The parent (and the sibling target) must be the live objects for
+      // their IDs: a stale handle to a deleted-and-restored node would
+      // link the new nodes into a tree nobody can see.
+      if (this.nodeMap.has(parent.id)) this._checkLive(parent);
+      if (target) {
+        if (this.nodeMap.has(parent.id)) this._checkLive(target);
+        if (target.parent !== parent || target.slotName !== slotName) {
+          throw new Error(`Node '${target.id}' is not in slot '${slotName}' of '${parent.id}'`);
+        }
+      }
       // A node (or ID) may enter the document once: the same node twice in
       // one batch would link it to itself, an existing ID would shadow a
       // live node.
@@ -394,18 +451,30 @@ export class LocalDoc {
     if (!end) throw new Error(`Node not found: ${endId}`);
 
     withTransaction(this, () => {
+      if (start === this.root) throw new Error("Root node cannot be deleted");
+      // Validate before recording anything, so a bad range inside an
+      // enclosing transaction leaves it untouched.
+      this._checkLive(start);
+      this._checkLive(end);
+      const range = iterRange(start, end);
+      if (range[range.length - 1] !== end) {
+        throw new Error(`Node '${end.id}' is not a later sibling of '${start.id}'`);
+      }
+
       onDeleteRange(
         this._diff, this._forwardOps, this._inverseOps,
         this.root, start, end,
       );
 
       // Remove from node map and drop the deleted nodes' own references
-      for (const node of iterRange(start, end)) {
+      for (const node of range) {
         for (const desc of descendantsInclusive(node)) {
           this.nodeMap.delete(desc.id);
+          this.graveyard.set(desc.id, new WeakRef(desc));
           this._refsRemove(desc);
         }
       }
+      if (this.graveyard.size > 4096) this._sweepGraveyard();
     });
   }
 
@@ -476,7 +545,15 @@ export class LocalDoc {
     newPrev: DocNode | null,
     newNext: DocNode | null,
   ): void {
+    this._checkLive(start);
+    this._checkLive(end);
+    this._checkLive(newParent);
+    if (newPrev) this._checkLive(newPrev);
+    if (newNext) this._checkLive(newNext);
     const range = iterRange(start, end);
+    if (range[range.length - 1] !== end) {
+      throw new Error(`Node '${end.id}' is not a later sibling of '${start.id}'`);
+    }
     if (range.includes(newParent)) throw new Error("Target is in the range");
     for (let anc = newParent.parent; anc; anc = anc.parent) {
       if (range.includes(anc)) throw new Error("Target is descendant of the range");
@@ -513,24 +590,29 @@ export class LocalDoc {
    * Apply operations (remote patches or inverse ops). With
    * `flags.skipUndo` the operations run in their own transaction that the
    * undo manager ignores; any open transaction is committed first.
+   *
+   * A failure rolls the operations back. By default it is then swallowed
+   * (best effort); with `raiseOnError` it propagates. Called inside an
+   * open transaction, the operations join it and a failure always
+   * propagates: the enclosing transaction rolls back as a whole.
    */
-  applyOperations(ops: WireOperations, flags?: TransactionFlags): void {
-    withTransaction(this, () => this._applyOps(ops), true, flags);
-    if (flags?.skipUndo && this._lifecycleStage === "update") {
-      this.forceCommit();
-    }
+  applyOperations(ops: WireOperations, flags?: TransactionFlags, raiseOnError = false): void {
+    withTransaction(this, () => this._applyOps(ops), !raiseOnError, flags);
   }
 
   /**
    * Apply operations through the tracked mutators, inside whatever
    * transaction is open. An operation whose target is missing is skipped
    * (best effort: undo and rollback may legitimately meet a node that is
-   * gone). Shared by `applyOperations` and `abort`, so the reverse
-   * reference index is maintained on every path.
+   * gone), as is a delete or move that fails; an insert that fails (a
+   * duplicate ID) or a malformed operation throws, and the transaction
+   * that called `applyOperations` rolls back as a whole. Shared by
+   * `applyOperations` and `abort`, so the reverse reference index is
+   * maintained on every path.
    */
   private _applyOps(ops: WireOperations): void {
     for (const op of ops.ordered) {
-      try {
+      {
         if (op[0] === 0) {
           // Insert
           const nodePairs = op[1] as [string, string][];
@@ -544,11 +626,7 @@ export class LocalDoc {
             : this.nodeMap.get(String(parentIdRaw));
           if (!parent) continue;
 
-          const nodes = nodePairs.map(([id, type]) => {
-            const n = this.createNode(type);
-            (n as { id: string }).id = id;
-            return n;
-          });
+          const nodes = nodePairs.map(([id, type]) => this._nodeForInsert(id, type));
 
           if (prevId) {
             const prev = this.nodeMap.get(String(prevId));
@@ -572,7 +650,11 @@ export class LocalDoc {
           const endIdRaw = op[2];
           const endId = endIdRaw === 0 ? undefined : String(endIdRaw);
           if (!this.nodeMap.has(startId)) continue;
-          this.deleteRange(startId, endId);
+          try {
+            this.deleteRange(startId, endId);
+          } catch {
+            // Skipped: the range is gone or no longer contiguous.
+          }
 
         } else if (op[0] === 2) {
           // Move
@@ -585,16 +667,20 @@ export class LocalDoc {
           const endId = endIdRaw === 0 ? undefined : String(endIdRaw);
           const parentId = parentIdRaw === 0 ? "" : String(parentIdRaw);
           if (!this.nodeMap.has(startId)) continue;
-          if (prevIdRaw && this.nodeMap.has(String(prevIdRaw))) {
-            this.moveRangeRelative(startId, endId, String(prevIdRaw), "after");
-          } else if (nextIdRaw && this.nodeMap.has(String(nextIdRaw))) {
-            this.moveRangeRelative(startId, endId, String(nextIdRaw), "before");
-          } else {
-            this.moveRange(startId, endId, parentId, slotName);
+          try {
+            if (prevIdRaw && this.nodeMap.has(String(prevIdRaw))) {
+              this.moveRangeRelative(startId, endId, String(prevIdRaw), "after");
+            } else if (nextIdRaw && this.nodeMap.has(String(nextIdRaw))) {
+              this.moveRangeRelative(startId, endId, String(nextIdRaw), "before");
+            } else {
+              this.moveRange(startId, endId, parentId, slotName);
+            }
+          } catch {
+            // Skipped: the move no longer applies.
           }
+        } else {
+          throw new Error(`Unknown operation code: ${String((op as unknown[])[0])}`);
         }
-      } catch {
-        // Skip failed ops (conflict)
       }
     }
 
@@ -604,6 +690,7 @@ export class LocalDoc {
       if (!node) continue;
       const defaults = this.schema.node_types[node.type]?.field_defaults ?? {};
       for (const [key, value] of Object.entries(patches)) {
+        this._checkField(node.type, key);
         onSetStateInverse(this._diff, this._inverseOps, node, key);
         const oldValue = node.state[key];
         if (value === null && !(key in defaults)) {
@@ -648,24 +735,41 @@ export class LocalDoc {
       }
 
       this._lifecycleStage = "change";
-      // Inverse ops are recorded in forward order; hand them out in
-      // application order.
+      // The event owns copies: listeners may keep it (the undo manager
+      // does), and a rollback after a failed listener must not rewrite
+      // what earlier listeners already received. Inverse ops are
+      // recorded in forward order; hand them out in application order.
       const event: ChangeEvent = {
-        operations: opsToWire(this._forwardOps),
+        operations: {
+          ordered: [...this._forwardOps.ordered],
+          state: copyState(this._forwardOps.state),
+        },
         inverseOperations: {
           ordered: [...this._inverseOps.ordered].reverse(),
-          state: this._inverseOps.state,
+          state: copyState(this._inverseOps.state),
         },
-        diff: this._diff,
-        flags: this._transactionFlags,
+        diff: {
+          inserted: new Set(this._diff.inserted),
+          deleted: new Map(this._diff.deleted),
+          moved: new Set(this._diff.moved),
+          updated: new Set(this._diff.updated),
+        },
+        flags: { ...this._transactionFlags },
       };
+      this.changeNotified = true;
       try {
         for (const cb of [...this.changeListeners]) {
           cb(event);
         }
-      } finally {
-        this._reset();
+      } catch (e) {
+        // A listener failed. Reopen the transaction and leave the
+        // recorded operations in place so the caller (withTransaction)
+        // can roll back.
+        this._lifecycleStage = "update";
+        throw e;
       }
+      this.changeNotified = false;
+      this._reset();
       return;
     }
 
@@ -691,6 +795,13 @@ export class LocalDoc {
       this._applyOps(inverse);
     } finally {
       // Whatever happens, the document must not stay in the update stage.
+      if (this.changeNotified) {
+        // Change listeners already ran for this transaction (one of them
+        // failed). Whoever kept a record of it (the undo manager) must
+        // forget it.
+        this.changeNotified = false;
+        for (const cb of [...this.rollbackListeners]) cb();
+      }
       this._reset();
       this._rebuildRefIndex();
     }
@@ -706,6 +817,19 @@ export class LocalDoc {
     };
   }
 
+  /**
+   * Called when a commit is rolled back *after* its change listeners ran
+   * (a later listener threw). Listeners that recorded the change must
+   * take it back.
+   */
+  onCommitRolledBack(cb: () => void): () => void {
+    this.rollbackListeners.push(cb);
+    return () => {
+      const idx = this.rollbackListeners.indexOf(cb);
+      if (idx >= 0) this.rollbackListeners.splice(idx, 1);
+    };
+  }
+
   // --- Serialization ---
 
   toSnapshot(): JsonDoc {
@@ -713,6 +837,58 @@ export class LocalDoc {
   }
 
   // --- Internal ---
+
+  /** Throw unless `node` is the object the document holds for its ID. */
+  private _checkLive(node: DocNode): void {
+    const live = this.nodeMap.get(node.id);
+    if (!live) throw new Error(`Node '${node.id}' is not in the document`);
+    if (live !== node) {
+      throw new Error(
+        `Node '${node.id}' is a stale handle: the document holds a different object for this ID`,
+      );
+    }
+  }
+
+  private _checkField(type: string, key: string): void {
+    const def = this.schema.node_types[type];
+    if (def && !(key in def.field_tiers)) {
+      throw new Error(`${type} has no field '${key}'`);
+    }
+  }
+
+  /**
+   * A bare node for an insert operation. If the ID belongs to a node this
+   * document removed earlier (an undone delete, a rolled-back
+   * transaction) and someone still holds that object, it is revived:
+   * reset to a fresh node and handed back, so the holder's handle is
+   * live again. Otherwise a new object is created.
+   */
+  private _nodeForInsert(id: string, type: string): DocNode {
+    const old = this.graveyard.get(id)?.deref();
+    this.graveyard.delete(id);
+    if (old && old.type === type) {
+      resetDocNode(old);
+      this._applyDefaults(old);
+      return old;
+    }
+    const node = this.createNode(type);
+    (node as { id: string }).id = id;
+    return node;
+  }
+
+  private _applyDefaults(node: DocNode): void {
+    const defaults = this.schema.node_types[node.type]?.field_defaults;
+    if (!defaults) return;
+    for (const [k, v] of Object.entries(defaults)) {
+      if (!(k in node.state)) node.state[k] = structuredClone(v);
+    }
+  }
+
+  private _sweepGraveyard(): void {
+    for (const [id, ref] of this.graveyard) {
+      if (ref.deref() === undefined) this.graveyard.delete(id);
+    }
+  }
 
   private _attachNode(
     node: DocNode,

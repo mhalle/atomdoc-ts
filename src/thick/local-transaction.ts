@@ -54,6 +54,11 @@ export function withTransaction(
   try {
     fn();
   } catch (e) {
+    // A failure inside a joined transaction propagates untouched: there
+    // are no savepoints, so only the outermost boundary rolls back, and
+    // it rolls back everything. `isApplyOperations` swallows a failure
+    // only for a transaction this call opened.
+    if (!isNewTx) throw e;
     try {
       doc.abort();
     } catch {

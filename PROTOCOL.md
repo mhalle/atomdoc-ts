@@ -173,27 +173,26 @@ Sent after every committed transaction.
       "ann-3": { "label": "Third" }
     }
   },
-  "source_client": "e99065b8-8503-4bae-a3f8-a47205a93cbb"
+  "source_client": "e99065b8-8503-4bae-a3f8-a47205a93cbb",
+  "ref": "op-17"
 }
 ```
 
-`source_client` is the ID of the client whose request produced the patch, so
-a thick client can skip the echo of an operation it already applied. It is
-`null` when the commit carries more than that client sent (a server-side
-normalizer added or changed something), so the sender applies the patch
-like any remote change. A request that commits more than once (a multi-step
-`undo`) produces one `patch` per commit. A client that connects mid-request
-receives the change in its snapshot, not as a patch.
+`ref` is the `ref` of the client request that produced the patch (`null`
+for a change the host made directly). A request that commits more than
+once (a multi-step `undo`, an `op` a server-side normalizer split) produces
+one `patch` per commit, all carrying the same `ref`.
 
-`source_client` is the ID of the client whose request produced the patch, so
-a thick client can skip the echo of an operation it already applied. It is
-`null` when the commit carries more than that client sent — a server-side
-normalizer added or changed something — so the sender applies the patch
-like any remote change. A request that commits more than once (a multi-step
-`undo`) produces one `patch` per commit. A client that connects mid-request
-receives the change in its snapshot, not as a patch.
+`source_client` is set only when the patch is the verbatim echo of that
+client's `op` — the operations it already applied locally. It is `null`
+for a `create`, `undo` or `redo` result (the requester never applied those
+operations itself), for a commit that carries more than the client sent (a
+normalizer ran), and for a host-side change; in every such case the
+requester applies the patch like any remote change. A client that connects
+during a commit receives the change either in its snapshot or as a patch
+after it, never both.
 
-`version` is a monotonically increasing integer. `source_client` identifies which client initiated the change.
+`version` is a monotonically increasing integer.
 
 #### `error`
 
@@ -609,14 +608,20 @@ The server broadcasts patches to ALL clients, including the source. The thick cl
 
 ```
 on patch message:
-  if msg.source_client == my client_id:
-    skip (already applied locally)
-    update version
-  else:
-    doc.applyOperations(msg.operations)  # apply remote change
+  update version
+  if msg.ref names one of my pending ops:
+    forget that op and every pending op before it (the server answers in order)
+    if msg.source_client == my client_id:
+      skip (already applied locally)
+      return
+  doc.applyOperations(msg.operations, skipUndo)  # apply as a remote change
 ```
 
-The `client_id` comes from the `snapshot` message.
+Matching by `ref` rather than by count matters when one request produces
+several patches (only the first is the verbatim echo) and after a resync,
+when the pending list was dropped and a late echo must be applied. An
+`error` carrying a pending `ref` forgets that op too. The `client_id` comes
+from the `snapshot` message.
 
 #### 13. Remote Echo Guard
 
@@ -834,7 +839,7 @@ The thin client is ~500 lines in any of these. The thick client adds ~1000 lines
 
 ### Infinite loops / stack overflow
 
-- Check for remote echo: thick clients must skip patches where `source_client` matches their own `client_id`
+- Check for remote echo: thick clients must skip patches whose `ref` names a pending op *and* whose `source_client` matches their own `client_id`
 - Check for re-send: `doc.onChange` listener must NOT send operations that came from remote patches (use `applyingRemote` flag)
 - Check that subscription callbacks don't trigger store writes that trigger more callbacks
 

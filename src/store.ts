@@ -45,8 +45,9 @@ export class NodeStore {
   }
 
   _removeNode(id: string): void {
+    // Listeners stay: the node may come back (undo, resync) and a
+    // subscriber that never unsubscribed must hear about it.
     this.nodes.delete(id);
-    this.listeners.delete(id);
     this._notify(id);
   }
 
@@ -85,9 +86,6 @@ export class NodeStore {
         this._notify(id);
       }
     });
-    for (const id of previous) {
-      if (!this.nodes.has(id)) this.listeners.delete(id);
-    }
   }
 
   private _loadNode(

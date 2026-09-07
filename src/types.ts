@@ -81,7 +81,14 @@ export interface PatchMsg {
   type: "patch";
   version: number;
   operations: WireOperations;
-  source_client: string;
+  /**
+   * Set only when the patch is the verbatim echo of that client's `op`;
+   * null for a `create`/`undo`/`redo` result, a normalized commit, or a
+   * host-side change.
+   */
+  source_client: string | null;
+  /** The `ref` of the client request that produced this patch, if any. */
+  ref?: string | null;
 }
 
 export interface ErrorMsg {

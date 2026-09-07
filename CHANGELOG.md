@@ -16,11 +16,12 @@ with atomdoc >= 0.3.0.
 - **A duplicate node ID was accepted and silently shadowed a live node.**
   Rejected now, as is the same node twice in one insert.
 - **`NodeStore.loadSnapshot` notified nobody**, so a UI rendered stale
-  data after a resync. Every subscriber is notified; listeners of removed
-  nodes are dropped.
+  data after a resync. Every subscriber is notified.
 - **An accepted op in flight behind a rejected one was lost.** Its echo
   arrived after the resync snapshot and was skipped as a self-echo. Echoes
-  are skipped only while an op is pending; after a resync they apply.
+  are now matched by the request `ref` the server returns on every patch:
+  a patch is skipped only when it carries the `ref` of a pending op and
+  `source_client` is this client; everything else applies.
 - **Offline edits were never replayed and `onOnline` never fired.**
   Buffered operations are replayed as fresh local transactions once the
   reconnect snapshot lands.
@@ -30,28 +31,36 @@ with atomdoc >= 0.3.0.
   discriminated unions, and a `null` default makes a field nullable.
   `defineNode` fields take `nullable: true`; `defineValue` exports a
   `required` list. The `defineNode` docstring example now validates.
-- **`abort()` applied inverse operations in the wrong order** and bypassed
-  the reverse reference index. A throwing transaction body could delete a
-  pre-existing node for good, and after any rollback a still-referenced
-  node could be deleted. Rollback now runs in reverse through the tracked
-  mutators.
-- **A duplicate node ID was accepted and silently shadowed a live node.**
-  Rejected now, as is the same node twice in one insert.
-- **`NodeStore.loadSnapshot` notified nobody**, so a UI rendered stale
-  data after a resync. Every subscriber is notified; listeners of removed
-  nodes are dropped.
-- **An accepted op in flight behind a rejected one was lost.** Its echo
-  arrived after the resync snapshot and was skipped as a self-echo. Echoes
-  are skipped only while an op is pending; after a resync they apply.
-- **Offline edits were never replayed and `onOnline` never fired.**
-  Buffered operations are replayed as fresh local transactions once the
-  reconnect snapshot lands.
-- **The Zod converter dropped array/object defaults and enforced no
-  constraints.** It now handles `enum`, `const`, string and numeric
-  bounds, `prefixItems`, `additionalProperties`, `required`, and
-  discriminated unions, and a `null` default makes a field nullable.
-  `defineNode` fields take `nullable: true`; `defineValue` exports a
-  `required` list. The `defineNode` docstring example now validates.
+- **One failing op in an `applyOperations` batch rolled back the whole
+  open transaction and let the remaining ops commit on their own**,
+  without the batch's `skipUndo` flag — so a remote patch could enter
+  local undo history, and an undo could strand a step. A nested
+  transaction failure now propagates and only the outermost boundary
+  rolls back; a batch is atomic; an undo that cannot apply throws and
+  keeps its step.
+- **A throwing change listener committed the transaction** instead of
+  rolling it back, and the undo manager kept an entry for it. Listeners
+  now receive copies, a failure rolls back, and the undo manager takes
+  its entry back.
+- **A handle to a node that was deleted and restored (undo, rollback)
+  went stale**; the restore now revives the same object, and a stale
+  object is refused rather than corrupting the tree.
+- **`insertIntoSlot` accepted an unknown slot**, leaving a node reachable
+  by ID but absent from every snapshot. Unknown slots, unknown fields
+  and unknown operation codes are rejected.
+- **`handles()` missed handles held in array and map fields.**
+- **A late `close` from a replaced socket knocked the live connection
+  offline for good**, and operations in flight when a socket dropped
+  were discarded. Events from a socket that is no longer current are
+  ignored; in-flight operations are re-queued ahead of offline edits and
+  replayed on reconnect; `onOnline` fires after the reconnect snapshot.
+- **A store subscriber was dead once its node left a snapshot** even if
+  the node came back; listeners are kept until unsubscribed.
+- **A Python-legal regex (`(?P<name>...)`, `\A`, `\Z`) threw out of the
+  schema registry**, and `allOf` / `type: [...]` accepted anything.
+  Patterns are translated and, if still not compilable, left
+  unconstrained; `allOf` intersects; a type list is a union; a
+  discriminator whose tag has a default is still detected.
 - **Remote patches polluted local undo.** `ThickAtomDocClient` applied patches
   from other clients through the same path as local edits, so undo could
   revert another user's change. Remote patches are now applied with

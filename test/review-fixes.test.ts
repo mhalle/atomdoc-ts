@@ -143,7 +143,7 @@ describe("review fixes: LocalDoc", () => {
 });
 
 describe("review fixes: store and client", () => {
-  it("loadSnapshot notifies subscribers and drops listeners of removed nodes", () => {
+  it("loadSnapshot notifies subscribers and keeps listeners of removed nodes", () => {
     const store = new NodeStore();
     store.loadSnapshot(snapshot);
     const onN1 = vi.fn();
@@ -162,8 +162,12 @@ describe("review fixes: store and client", () => {
     expect(onN3).toHaveBeenCalledTimes(1);
     expect(onAll).toHaveBeenCalledTimes(1);
     expect(store.getNode("n3")).toBeUndefined();
-    const listeners = (store as unknown as { listeners: Map<string, unknown> }).listeners;
-    expect(listeners.has("n3")).toBe(false);
+    // The node may come back (undo, a later resync); the subscriber
+    // must hear about it.
+    store.loadSnapshot(snapshot);
+    expect(onN3).toHaveBeenCalledTimes(2);
+    store._updateState("n3", "name", "changed");
+    expect(onN3).toHaveBeenCalledTimes(3);
   });
 
   function onlineClient(sent: WireOperations[]): ThickAtomDocClient {
@@ -215,8 +219,10 @@ describe("review fixes: store and client", () => {
       type: "patch",
       version: 1,
       source_client: "me",
+      ref: "op-1",
       operations: { ordered: [], state: { n1: { name: "local" } } },
     });
+    expect((c as unknown as { pendingOps: unknown[] }).pendingOps).toEqual([]);
     expect(c.getUndoManager()!.canUndo).toBe(true);
     expect(c.getDoc()!.getNode("n1")!.state.name).toBe("local");
     expect(sent.length).toBe(1);

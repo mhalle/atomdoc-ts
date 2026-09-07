@@ -148,7 +148,7 @@ function buildZod(jsonSchema: Record<string, unknown>): z.ZodType {
     const disc = jsonSchema.discriminator as { propertyName?: string } | undefined;
     const key = disc?.propertyName;
     const allTagged = key !== undefined && options.every(
-      (o) => o instanceof z.ZodObject && o.shape[key] instanceof z.ZodLiteral,
+      (o) => o instanceof z.ZodObject && isLiteral(o.shape[key]),
     );
     if (allTagged) {
       return z.discriminatedUnion(
@@ -162,14 +162,32 @@ function buildZod(jsonSchema: Record<string, unknown>): z.ZodType {
     return z.union(options as [z.ZodType, z.ZodType, ...z.ZodType[]]);
   }
 
-  const type = jsonSchema.type as string | undefined;
+  const allOf = jsonSchema.allOf as Record<string, unknown>[] | undefined;
+  if (Array.isArray(allOf) && allOf.length > 0) {
+    const parts = allOf.map(buildZod);
+    let combined: z.ZodType = parts[0];
+    for (const part of parts.slice(1)) combined = z.intersection(combined, part);
+    return combined;
+  }
+
+  const rawType = jsonSchema.type;
+  if (Array.isArray(rawType)) {
+    // `"type": ["string", "null"]`: one of several primitive types.
+    const options = rawType.map((t) => buildZod({ ...jsonSchema, type: t }));
+    if (options.length === 1) return options[0];
+    return z.union(options as [z.ZodType, z.ZodType, ...z.ZodType[]]);
+  }
+  const type = rawType as string | undefined;
 
   if (type === "null") return z.null();
   if (type === "string") {
     let str = z.string();
     if (typeof jsonSchema.minLength === "number") str = str.min(jsonSchema.minLength);
     if (typeof jsonSchema.maxLength === "number") str = str.max(jsonSchema.maxLength);
-    if (typeof jsonSchema.pattern === "string") str = str.regex(new RegExp(jsonSchema.pattern));
+    if (typeof jsonSchema.pattern === "string") {
+      const re = pythonRegexToJs(jsonSchema.pattern);
+      if (re) str = str.regex(re);
+    }
     return str;
   }
   if (type === "integer" || type === "number") {
@@ -227,4 +245,35 @@ function buildZod(jsonSchema: Record<string, unknown>): z.ZodType {
 
   // Fallback: accept anything
   return z.unknown();
+}
+
+function isLiteral(schema: z.ZodType | undefined): boolean {
+  if (!schema) return false;
+  if (schema instanceof z.ZodLiteral) return true;
+  if (schema instanceof z.ZodDefault || schema instanceof z.ZodOptional) {
+    return isLiteral((schema._def as { innerType: z.ZodType }).innerType);
+  }
+  return false;
+}
+
+/**
+ * Translate a Python (Rust `regex` crate) pattern to a JS RegExp. Named
+ * groups and the string anchors differ; inline flags are not supported.
+ * Returns null when the pattern cannot be compiled, in which case the
+ * string is left unconstrained rather than rejecting every value.
+ */
+function pythonRegexToJs(pattern: string): RegExp | null {
+  const translated = pattern
+    .replace(/\(\?P</g, "(?<")
+    .replace(/\\A/g, "^")
+    .replace(/\\[Zz]/g, "$");
+  try {
+    return new RegExp(translated, "u");
+  } catch {
+    try {
+      return new RegExp(translated);
+    } catch {
+      return null;
+    }
+  }
 }

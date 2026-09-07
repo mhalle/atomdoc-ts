@@ -46,9 +46,13 @@ export class ThickAtomDocClient {
   private bridgeUnsub: (() => void) | null = null;
   private docUnsub: (() => void) | null = null;
   private online = false;
-  private pendingOps: WireOperations[] = [];
+  /** Sent, not yet echoed or rejected; matched by `ref`. */
+  private pendingOps: Array<{ ref: string; ops: WireOperations }> = [];
   private bufferedOps: WireOperations[] = [];
   private applyingRemote = false;
+  private nextRef = 1;
+  /** Online again, but the reconnect snapshot has not arrived yet. */
+  private onlinePending = false;
 
   private connectedCallbacks = new Set<() => void>();
   private resyncCallbacks = new Set<() => void>();
@@ -67,23 +71,33 @@ export class ThickAtomDocClient {
 
   connect(): Promise<void> {
     return new Promise((resolve, reject) => {
+      // One live socket at a time: a previous one (a failed attempt, a
+      // connection being replaced) must not report on this client.
+      const previous = this.ws;
+      if (previous) {
+        this._detachSocket(previous);
+        previous.close();
+        this._wentOffline();
+      }
       const ws = new WebSocket(this.url);
       this.ws = ws;
 
       ws.onopen = () => {
-        const wasOffline = !this.online && this.doc !== null;
+        if (this.ws !== ws) return;
         this.online = true;
-        if (wasOffline) {
-          for (const cb of this.onlineCallbacks) cb();
-        }
+        // Online callbacks wait for the reconnect snapshot, so they see
+        // the resynced document rather than the stale one.
+        this.onlinePending = this.doc !== null;
         resolve();
       };
 
       ws.onerror = (event) => {
+        if (this.ws !== ws) return;
         reject(event);
       };
 
       ws.onmessage = (event) => {
+        if (this.ws !== ws) return;
         const msg = JSON.parse(
           typeof event.data === "string" ? event.data : event.data.toString(),
         ) as ServerMsg;
@@ -91,22 +105,46 @@ export class ThickAtomDocClient {
       };
 
       ws.onclose = () => {
-        const wasOnline = this.online;
-        this.online = false;
+        // A late close from a socket that was already replaced says
+        // nothing about the live connection.
+        if (this.ws !== ws) return;
         this.ws = null;
-        if (wasOnline) {
-          for (const cb of this.offlineCallbacks) cb();
-        }
+        this._wentOffline();
       };
     });
   }
 
   disconnect(): void {
-    if (this.ws) {
-      this.ws.close();
-      this.ws = null;
+    const ws = this.ws;
+    this.ws = null;
+    if (ws) {
+      this._detachSocket(ws);
+      ws.close();
     }
+    this._wentOffline();
+  }
+
+  private _detachSocket(ws: WebSocket): void {
+    ws.onopen = null;
+    ws.onerror = null;
+    ws.onmessage = null;
+    ws.onclose = null;
+  }
+
+  private _wentOffline(): void {
+    const wasOnline = this.online;
     this.online = false;
+    this.onlinePending = false;
+    // Operations sent but not yet echoed may never have reached the
+    // server: keep them, ahead of anything buffered since, so the
+    // reconnect replays them in order.
+    if (this.pendingOps.length > 0) {
+      this.bufferedOps = [...this.pendingOps.map((p) => p.ops), ...this.bufferedOps];
+      this.pendingOps = [];
+    }
+    if (wasOnline) {
+      for (const cb of this.offlineCallbacks) cb();
+    }
   }
 
   // --- State access ---
@@ -212,8 +250,10 @@ export class ThickAtomDocClient {
    * Fires when the server replaces the local document with a fresh
    * snapshot after connecting — because it rejected one of this client's
    * operations (error code `rejected`) or on reconnect. The local doc, store,
-   * and undo history are rebuilt from the snapshot; pending operations are
-   * dropped. UI that caches DocNode references must re-read them.
+   * and undo history are rebuilt from the snapshot. Operations still in
+   * flight are dropped: the server either applied them (they are in the
+   * snapshot) or rejected them. UI that caches DocNode references must
+   * re-read them.
    */
   onResync(cb: () => void): () => void {
     this.resyncCallbacks.add(cb);
@@ -254,9 +294,18 @@ export class ThickAtomDocClient {
         break;
 
       case "error":
+        if (msg.ref) this._dropPending(msg.ref);
         for (const cb of this.errorCallbacks) cb(msg);
         break;
     }
+  }
+
+  /** Forget pending operations up to and including `ref`; true if found. */
+  private _dropPending(ref: string): boolean {
+    const idx = this.pendingOps.findIndex((p) => p.ref === ref);
+    if (idx < 0) return false;
+    this.pendingOps.splice(0, idx + 1);
+    return true;
   }
 
   private _initDoc(snapshot: JsonDoc, version: number): void {
@@ -265,7 +314,8 @@ export class ThickAtomDocClient {
     const isResync = this.doc !== null;
 
     // Clean up previous doc. Anything in flight was either acknowledged
-    // (and is in the snapshot) or rejected (and is not).
+    // (and is in the snapshot) or rejected (and is not): the server
+    // answered every request it received before taking this snapshot.
     if (this.bridgeUnsub) this.bridgeUnsub();
     if (this.docUnsub) this.docUnsub();
     if (this.undoMgr) this.undoMgr.dispose();
@@ -299,19 +349,27 @@ export class ThickAtomDocClient {
     if (isResync) {
       for (const cb of this.resyncCallbacks) cb();
     }
+    if (this.onlinePending) {
+      this.onlinePending = false;
+      for (const cb of this.onlineCallbacks) cb();
+    }
   }
 
   private _handlePatch(msg: PatchMsg): void {
     this.version = msg.version;
 
-    if (msg.source_client === this.clientId && this.pendingOps.length > 0) {
+    // A patch carrying one of our refs answers that request (and any
+    // earlier one still pending: the server handles requests in order).
+    const answersOurs = typeof msg.ref === "string" && this._dropPending(msg.ref);
+
+    if (msg.source_client === this.clientId && answersOurs) {
       // Self-echo of an op we applied locally: just update version.
-      this.pendingOps.shift();
     } else {
       // Remote change — or our own op echoed after a resync dropped the
-      // pending list (the snapshot predates it), which must be applied.
-      // Remote change: apply to local doc (flag to prevent re-sending,
-      // skipUndo so another user's edits never enter local undo history)
+      // pending list (the snapshot predates it), or a commit the server
+      // normalized, either of which must be applied.
+      // Apply to local doc (flag to prevent re-sending, skipUndo so
+      // another user's edits never enter local undo history)
       if (this.doc) {
         this.applyingRemote = true;
         try {
@@ -327,9 +385,11 @@ export class ThickAtomDocClient {
 
   private _sendOps(ops: WireOperations): void {
     if (this.online && this.ws) {
-      this.pendingOps.push(ops);
+      const ref = `op-${this.nextRef++}`;
+      this.pendingOps.push({ ref, ops });
       this._send({
         type: "op",
+        ref,
         operations: ops,
       });
     } else {

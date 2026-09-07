@@ -54,6 +54,22 @@ export function createDocNode(
   };
 }
 
+/**
+ * Reset a node to the detached, empty state `createDocNode` returns, in
+ * place — so a handle to it stays valid when the node is revived.
+ */
+export function resetDocNode(node: DocNode): void {
+  node.state = {};
+  node.parent = null;
+  node.slotName = null;
+  node.prevSibling = null;
+  node.nextSibling = null;
+  for (const name of node.slotOrder) {
+    node.slotFirst.set(name, null);
+    node.slotLast.set(name, null);
+  }
+}
+
 /** Get ordered list of children in a slot. */
 export function getSlotChildren(node: DocNode, slotName: string): DocNode[] {
   const result: DocNode[] = [];
