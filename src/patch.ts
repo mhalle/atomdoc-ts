@@ -5,25 +5,56 @@
 import type { NodeStore } from "./store.js";
 import type { WireOperations } from "./types.js";
 
+/**
+ * Child lists touched by the ordered operations of one patch, written to
+ * the store once at the end. The store keeps child lists as immutable
+ * arrays (subscribers compare references), so writing after every
+ * operation would copy a slot's array per insert and make a transaction
+ * that fills a slot node by node quadratic.
+ */
+class SlotEdits {
+  private lists = new Map<string, string[]>();
+  constructor(private store: NodeStore) {}
+
+  get(parentId: string, slotName: string): string[] {
+    const key = `${parentId}\u0000${slotName}`;
+    let list = this.lists.get(key);
+    if (!list) {
+      list = [...this.store.getChildren(parentId, slotName)];
+      this.lists.set(key, list);
+    }
+    return list;
+  }
+
+  flush(): void {
+    for (const [key, list] of this.lists) {
+      const sep = key.indexOf("\u0000");
+      this.store._setChildren(key.slice(0, sep), key.slice(sep + 1), list);
+    }
+  }
+}
+
 export function applyPatch(
   store: NodeStore,
   operations: WireOperations,
 ): void {
   store.batch(() => {
     // Apply ordered operations first
+    const slots = new SlotEdits(store);
     for (const op of operations.ordered) {
       switch (op[0]) {
         case 0:
-          applyInsert(store, op);
+          applyInsert(store, slots, op);
           break;
         case 1:
-          applyDelete(store, op);
+          applyDelete(store, slots, op);
           break;
         case 2:
-          applyMove(store, op);
+          applyMove(store, slots, op);
           break;
       }
     }
+    slots.flush();
 
     // Apply state patches (values are native JSON — no parsing needed)
     for (const [nodeId, patches] of Object.entries(operations.state)) {
@@ -40,6 +71,7 @@ function resolveId(id: string | 0): string | null {
 
 function applyInsert(
   store: NodeStore,
+  slots: SlotEdits,
   op: [0, [string, string][], string | 0, string, string | 0, string | 0],
 ): void {
   const [, nodePairs, parentIdRaw, slotName, prevIdRaw, nextIdRaw] = op;
@@ -66,8 +98,10 @@ function applyInsert(
     newIds.push(id);
   }
 
-  // Insert into parent's slot at the right position
-  const children = [...(parent.slots[slotName] ?? [])];
+  // Insert into parent's slot at the right position. The common case,
+  // appending after the current last child, is O(1); the list is written
+  // to the store once per patch.
+  const children = slots.get(parentId, slotName);
 
   if (nextId) {
     const idx = children.indexOf(nextId);
@@ -77,21 +111,24 @@ function applyInsert(
       children.push(...newIds);
     }
   } else if (prevId) {
-    const idx = children.indexOf(prevId);
-    if (idx >= 0) {
-      children.splice(idx + 1, 0, ...newIds);
-    } else {
+    if (children[children.length - 1] === prevId) {
       children.push(...newIds);
+    } else {
+      const idx = children.indexOf(prevId);
+      if (idx >= 0) {
+        children.splice(idx + 1, 0, ...newIds);
+      } else {
+        children.push(...newIds);
+      }
     }
   } else {
     children.push(...newIds);
   }
-
-  store._setChildren(parentId, slotName, children);
 }
 
 function applyDelete(
   store: NodeStore,
+  slots: SlotEdits,
   op: [1, string, string | 0],
 ): void {
   const [, startId, endIdRaw] = op;
@@ -102,20 +139,14 @@ function applyDelete(
 
   const parentId = startNode.parentId;
   const slotName = startNode.slotName;
-  const children = store.getChildren(parentId, slotName);
+  const children = slots.get(parentId, slotName);
 
   // Find the range of IDs to delete
   const startIdx = children.indexOf(startId);
   const endIdx = children.indexOf(endId);
   if (startIdx < 0 || endIdx < 0) return;
 
-  const toRemove = children.slice(startIdx, endIdx + 1);
-  const remaining = [
-    ...children.slice(0, startIdx),
-    ...children.slice(endIdx + 1),
-  ];
-
-  store._setChildren(parentId, slotName, remaining);
+  const toRemove = children.splice(startIdx, endIdx - startIdx + 1);
 
   // Remove nodes and their descendants
   for (const id of toRemove) {
@@ -124,18 +155,19 @@ function applyDelete(
 }
 
 function removeRecursive(store: NodeStore, nodeId: string): void {
-  const node = store.getNode(nodeId);
-  if (!node) return;
-  for (const childIds of Object.values(node.slots)) {
-    for (const childId of childIds) {
-      removeRecursive(store, childId);
-    }
+  const stack = [nodeId];
+  while (stack.length > 0) {
+    const id = stack.pop()!;
+    const node = store.getNode(id);
+    if (!node) continue;
+    for (const childIds of Object.values(node.slots)) stack.push(...childIds);
+    store._removeNode(id);
   }
-  store._removeNode(nodeId);
 }
 
 function applyMove(
   store: NodeStore,
+  slots: SlotEdits,
   op: [
     2,
     string,
@@ -159,17 +191,12 @@ function applyMove(
   // Remove from old parent
   const oldParentId = startNode.parentId;
   const oldSlot = startNode.slotName;
-  const oldChildren = store.getChildren(oldParentId, oldSlot);
+  const oldChildren = slots.get(oldParentId, oldSlot);
   const startIdx = oldChildren.indexOf(startId);
   const endIdx = oldChildren.indexOf(endId);
   if (startIdx < 0 || endIdx < 0) return;
 
-  const movedIds = oldChildren.slice(startIdx, endIdx + 1);
-  const remaining = [
-    ...oldChildren.slice(0, startIdx),
-    ...oldChildren.slice(endIdx + 1),
-  ];
-  store._setChildren(oldParentId, oldSlot, remaining);
+  const movedIds = oldChildren.splice(startIdx, endIdx - startIdx + 1);
 
   // Update parent/slot on moved nodes (immutable update so reactive
   // subscribers see a new object reference — see NodeStore contract).
@@ -181,7 +208,7 @@ function applyMove(
   }
 
   // Insert into new parent
-  const newChildren = [...store.getChildren(newParentId, slotName)];
+  const newChildren = slots.get(newParentId, slotName);
   if (nextId) {
     const idx = newChildren.indexOf(nextId);
     if (idx >= 0) {
@@ -199,6 +226,4 @@ function applyMove(
   } else {
     newChildren.push(...movedIds);
   }
-
-  store._setChildren(newParentId, slotName, newChildren);
 }

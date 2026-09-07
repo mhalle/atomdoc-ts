@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **Filling a slot node by node through the thin store was quadratic.**
+  `applyPatch` copied the parent's child array on every insert, delete
+  or move. A patch now edits each touched child list once and writes it
+  to the store at the end, so one transaction that appends n nodes is
+  linear; a single-operation patch still costs the length of the slot,
+  because the store keeps child lists as immutable arrays.
+- **A tree thousands of levels deep overflowed the call stack** in
+  `LocalDoc` (snapshot load, `toSnapshot`, `descendants`, delete) and in
+  `NodeStore.loadSnapshot` / `applyPatch`. Every tree walk is iterative.
+
+### Added
+
+- **Performance suite.** `test/perf/bench.test.ts` (run with `BENCH=1`)
+  sweeps Slicer-like scenes across sizes and reports per-item cost and
+  the scaling ratio; `test/perf/scaling.test.ts` runs in the normal
+  suite and fails if any core operation turns quadratic, plus a
+  5000-deep chain round trip.
+
 ## 0.4.1
 
 Fixes from an outside review of the synchronization layer: the thick

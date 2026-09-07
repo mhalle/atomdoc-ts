@@ -88,35 +88,33 @@ export class NodeStore {
     });
   }
 
+  /** Load a node and its subtree, iteratively (any nesting depth). */
   private _loadNode(
     data: JsonDoc,
     parentId: string | null,
     slotName: string | null,
   ): void {
-    const [id, type, state, slotsData] = data;
-    const slots: Record<string, string[]> = {};
+    const work: Array<[JsonDoc, string | null, string | null]> = [[data, parentId, slotName]];
+    while (work.length > 0) {
+      const [entry, pid, sname] = work.pop()!;
+      const [id, type, state, slotsData] = entry;
+      const slots: Record<string, string[]> = {};
 
-    if (slotsData) {
-      for (const [name, children] of Object.entries(slotsData)) {
-        slots[name] = children.map((child) => child[0]);
-      }
-    }
-
-    this.nodes.set(id, {
-      id,
-      type,
-      state: { ...state },
-      slots,
-      parentId,
-      slotName,
-    });
-
-    if (slotsData) {
-      for (const [name, children] of Object.entries(slotsData)) {
-        for (const child of children) {
-          this._loadNode(child, id, name);
+      if (slotsData) {
+        for (const [name, children] of Object.entries(slotsData)) {
+          slots[name] = children.map((child) => child[0]);
+          for (const child of children) work.push([child, id, name]);
         }
       }
+
+      this.nodes.set(id, {
+        id,
+        type,
+        state: { ...state },
+        slots,
+        parentId: pid,
+        slotName: sname,
+      });
     }
   }
 

@@ -46,21 +46,42 @@ export function detachRange(start: DocNode, end: DocNode): void {
   end.nextSibling = null;
 }
 
-/** Yield all descendants of a node (depth-first, excludes node). */
+/**
+ * All descendants of a node, depth-first in document order (excludes the
+ * node itself). Iterative: a chain thousands of nodes deep must not
+ * overflow the call stack.
+ */
 export function descendants(node: DocNode): DocNode[] {
   const result: DocNode[] = [];
-  for (const slotName of node.slotOrder) {
-    let child = node.slotFirst.get(slotName) ?? null;
-    while (child !== null) {
-      result.push(child);
-      result.push(...descendants(child));
-      child = child.nextSibling;
-    }
+  const stack: DocNode[] = [];
+  pushChildren(stack, node);
+  while (stack.length > 0) {
+    const current = stack.pop()!;
+    result.push(current);
+    pushChildren(stack, current);
   }
   return result;
 }
 
-/** Yield node and all its descendants (depth-first). */
+/** Node and all its descendants (depth-first, document order). */
 export function descendantsInclusive(node: DocNode): DocNode[] {
-  return [node, ...descendants(node)];
+  const result: DocNode[] = [];
+  const stack: DocNode[] = [node];
+  while (stack.length > 0) {
+    const current = stack.pop()!;
+    result.push(current);
+    pushChildren(stack, current);
+  }
+  return result;
+}
+
+/** Push a node's children so they pop in document order. */
+function pushChildren(stack: DocNode[], node: DocNode): void {
+  for (let i = node.slotOrder.length - 1; i >= 0; i--) {
+    let child = node.slotLast.get(node.slotOrder[i]) ?? null;
+    while (child !== null) {
+      stack.push(child);
+      child = child.prevSibling;
+    }
+  }
 }

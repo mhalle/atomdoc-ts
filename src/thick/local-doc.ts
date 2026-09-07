@@ -933,63 +933,79 @@ export class LocalDoc {
     return node;
   }
 
+  /** Load slot children from a snapshot, iteratively (any nesting depth). */
   private _loadSlots(
-    parent: DocNode,
-    slotsData: Record<string, JsonDoc[]>,
+    root: DocNode,
+    rootSlots: Record<string, JsonDoc[]>,
   ): void {
-    for (const [slotName, children] of Object.entries(slotsData)) {
-      if (!parent.slotFirst.has(slotName)) continue;
+    const work: Array<[DocNode, Record<string, JsonDoc[]>]> = [[root, rootSlots]];
+    while (work.length > 0) {
+      const [parent, slotsData] = work.pop()!;
+      for (const [slotName, children] of Object.entries(slotsData)) {
+        if (!parent.slotFirst.has(slotName)) continue;
 
-      let prev: DocNode | null = null;
-      for (const childJson of children) {
-        const child = this._createNodeFromJson(childJson);
-        child.parent = parent;
-        child.slotName = slotName;
-        child.prevSibling = prev;
+        let prev: DocNode | null = null;
+        for (const childJson of children) {
+          const child = this._createNodeFromJson(childJson);
+          child.parent = parent;
+          child.slotName = slotName;
+          child.prevSibling = prev;
+          if (prev) {
+            prev.nextSibling = child;
+          } else {
+            parent.slotFirst.set(slotName, child);
+          }
+          this.nodeMap.set(child.id, child);
+          prev = child;
+          if (childJson[3]) work.push([child, childJson[3]]);
+        }
         if (prev) {
-          prev.nextSibling = child;
-        } else {
-          parent.slotFirst.set(slotName, child);
+          parent.slotLast.set(slotName, prev);
         }
-        this.nodeMap.set(child.id, child);
-        prev = child;
-
-        // Recurse
-        if (childJson[3]) {
-          this._loadSlots(child, childJson[3]);
-        }
-      }
-      if (prev) {
-        parent.slotLast.set(slotName, prev);
       }
     }
   }
 
-  private _nodeToWire(node: DocNode): JsonDoc {
-    const state: Record<string, unknown> = {};
-    const defaults = this.schema.node_types[node.type]?.field_defaults ?? {};
-    for (const [k, v] of Object.entries(node.state)) {
-      if (JSON.stringify(v) !== JSON.stringify(defaults[k])) {
-        state[k] = v;
+  /**
+   * Serialize a node tree to wire format, iteratively: each node's entry
+   * is created when it is visited and its children are appended to it in
+   * document order as they are visited.
+   */
+  private _nodeToWire(root: DocNode): JsonDoc {
+    const entryFor = (node: DocNode): JsonDoc => {
+      const state: Record<string, unknown> = {};
+      const defaults = this.schema.node_types[node.type]?.field_defaults ?? {};
+      for (const [k, v] of Object.entries(node.state)) {
+        if (JSON.stringify(v) !== JSON.stringify(defaults[k])) {
+          state[k] = v;
+        }
       }
-    }
+      const result: JsonDoc = [node.id, node.type, state];
+      if (node.slotOrder.length > 0) {
+        const slots: Record<string, JsonDoc[]> = {};
+        for (const slotName of node.slotOrder) slots[slotName] = [];
+        result.push(slots);
+      }
+      return result;
+    };
 
-    const result: JsonDoc = [node.id, node.type, state];
-
-    if (node.slotOrder.length > 0) {
-      const slots: Record<string, JsonDoc[]> = {};
+    const rootEntry = entryFor(root);
+    const stack: Array<[DocNode, JsonDoc[] | null, JsonDoc]> = [[root, null, rootEntry]];
+    while (stack.length > 0) {
+      const [node, into, entry] = stack.pop()!;
+      if (into) into.push(entry);
+      if (node.slotOrder.length === 0) continue;
+      const slots = entry[3]!;
+      const pending: Array<[DocNode, JsonDoc[] | null, JsonDoc]> = [];
       for (const slotName of node.slotOrder) {
-        const children: JsonDoc[] = [];
         let child = node.slotFirst.get(slotName) ?? null;
         while (child !== null) {
-          children.push(this._nodeToWire(child));
+          pending.push([child, slots[slotName], entryFor(child)]);
           child = child.nextSibling;
         }
-        slots[slotName] = children;
       }
-      result.push(slots);
+      for (let i = pending.length - 1; i >= 0; i--) stack.push(pending[i]);
     }
-
-    return result;
+    return rootEntry;
   }
 }
