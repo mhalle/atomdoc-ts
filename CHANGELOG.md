@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.4.1
+
+Fixes from an outside review of the synchronization layer: the thick
+client now reconciles its echoes and masks remote writes under pending
+edits instead of skipping and applying blindly. Requires atomdoc >= 0.4.0
+(every patch carries the request `ref`); atomdoc 0.4.1 adds the matching
+`ListenerError` semantics (change listeners are post-commit observers).
+
+### Fixed
+
+- **A throwing change listener left the document inconsistent with what
+  other listeners had seen.** Change listeners are now post-commit
+  observers: every listener runs, the commit stands, events are copies,
+  and failures are thrown afterwards as `ListenerError` (with `errors`
+  and `cause`). An undo whose observer fails is not put back.
+- **Concurrent edits could diverge for good.** A client that wrote a
+  field, received an earlier host-side or remote write to the same field,
+  and then skipped its own echo stayed at the remote value while the
+  server kept the client's. An echo is now reconciled instead of
+  skipped: state fields are set to the echoed values and inserted nodes
+  are moved to the neighbours the server recorded, so the local document
+  converges on the server's order. A convergence harness
+  (`test/integration/convergence.test.ts`) drives a real thick client
+  against the real Python session while a fake device commits host-side
+  changes, with disjoint and overlapping ownership of fields and nodes.
+  A remote write to a field (or a move of a node) that a pending local
+  edit also touches is masked rather than applied, since the server's
+  final state is the local edit's; the undo entry for that edit is
+  refreshed so undoing it reveals the remote value (`UndoManager.
+  refreshOriginal`). The harness checks on every patch that a field with
+  a pending write shows the pending value.
+- **Another client's acknowledgement could retire this client's pending
+  work.** Refs were `op-N` in every client, and a patch's `ref` was
+  matched before its source was checked. Refs are now
+  `<client_id>:<n>` and only a ref this client minted can match.
+
 ## 0.4.0
 
 Thick-client parity with atomdoc (Python) 0.4.0, which ports the DocNode v0.4
@@ -47,31 +83,6 @@ with atomdoc >= 0.3.0.
   transaction failure now propagates and only the outermost boundary
   rolls back; a batch is atomic; an undo that cannot apply throws and
   keeps its step.
-- **A throwing change listener left the document inconsistent with what
-  other listeners had seen.** Change listeners are now post-commit
-  observers: every listener runs, the commit stands, events are copies,
-  and failures are thrown afterwards as `ListenerError` (with `errors`
-  and `cause`). An undo whose observer fails is not put back.
-- **Concurrent edits could diverge for good.** A client that wrote a
-  field, received an earlier host-side or remote write to the same field,
-  and then skipped its own echo stayed at the remote value while the
-  server kept the client's. An echo is now reconciled instead of
-  skipped: state fields are set to the echoed values and inserted nodes
-  are moved to the neighbours the server recorded, so the local document
-  converges on the server's order. A convergence harness
-  (`test/integration/convergence.test.ts`) drives a real thick client
-  against the real Python session while a fake device commits host-side
-  changes, with disjoint and overlapping ownership of fields and nodes.
-  A remote write to a field (or a move of a node) that a pending local
-  edit also touches is masked rather than applied, since the server's
-  final state is the local edit's; the undo entry for that edit is
-  refreshed so undoing it reveals the remote value (`UndoManager.
-  refreshOriginal`). The harness checks on every patch that a field with
-  a pending write shows the pending value.
-- **Another client's acknowledgement could retire this client's pending
-  work.** Refs were `op-N` in every client, and a patch's `ref` was
-  matched before its source was checked. Refs are now
-  `<client_id>:<n>` and only a ref this client minted can match.
 - **A handle to a node that was deleted and restored (undo, rollback)
   went stale**; the restore now revives the same object, and a stale
   object is refused rather than corrupting the tree.
