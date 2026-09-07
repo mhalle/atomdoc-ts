@@ -169,3 +169,47 @@ describe("ThickAtomDocClient", () => {
     expect(cb).toHaveBeenCalledWith(2);
   });
 });
+
+describe("ThickAtomDocClient resync", () => {
+  it("rebuilds the document from a second snapshot and drops pending ops", () => {
+    const client = new ThickAtomDocClient({ url: "ws://test" });
+    client._injectMessage({ type: "schema", schema });
+    client._injectMessage({
+      type: "snapshot",
+      doc_id: "01jqp00000000000000000000",
+      version: 1,
+      data: snapshot,
+      client_id: "c1",
+    });
+    const resynced = vi.fn();
+    client.onResync(resynced);
+
+    // A local edit that the server will reject.
+    client.setField("i1", "label", "optimistic");
+    expect(client.getDoc()!.getNode("i1")!.state.label).toBe("optimistic");
+    expect(client.getUndoManager()!.canUndo).toBe(true);
+
+    client._injectMessage({ type: "error", ref: "x", code: "rejected", message: "no" });
+    const corrected: JsonDoc = [
+      "01jqp00000000000000000000",
+      "Page",
+      { title: "Hello" },
+      { items: [["i1", "Item", { label: "server" }]] },
+    ];
+    client._injectMessage({ type: "snapshot", doc_id: "01jqp00000000000000000000", version: 7, data: corrected });
+
+    expect(resynced).toHaveBeenCalledTimes(1);
+    expect(client.getVersion()).toBe(7);
+    expect(client.getDoc()!.getNode("i1")!.state.label).toBe("server");
+    expect(client.getStore().getNode("i1")!.state.label).toBe("server");
+    expect(client.getUndoManager()!.canUndo).toBe(false);
+    // A self-echo after resync must not be mistaken for an older pending op.
+    client._injectMessage({
+      type: "patch",
+      version: 8,
+      operations: { ordered: [], state: { i1: { label: "later" } } },
+      source_client: "other",
+    });
+    expect(client.getDoc()!.getNode("i1")!.state.label).toBe("later");
+  });
+});

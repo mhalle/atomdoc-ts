@@ -101,6 +101,7 @@ Sent once on connect. Contains the full document schema.
     - `"ref"` — a reference to another node in the same document; the value is that node's ID (or an array of IDs)
   - `slots` — named ordered child collections, with allowed child type
   - `field_defaults` — default values for fields
+  - `handles` — fields holding a handle to something outside the document (bulk data, another document, an ontology term), keyed by field name: `{ "value_type": "VoxelData", "strength": "strong" | "weak" }`. A `strong` handle must resolve for the document to be usable; a `weak` one need not. Nothing in the protocol resolves handles; the list is what a consumer needs to decide whether it can open the document.
   - `refs` — reference fields (tier `"ref"`), keyed by field name:
     - `target_type` — node type the reference must point at, or `null` for any
     - `many` — `true` when the value is an array of IDs
@@ -118,7 +119,7 @@ Sent once on connect. Contains the full document schema.
     run the same check locally so a violating transaction is rolled back
     before it is sent. The server rejects one that slips through with an
     `error` (`invalid_op`) and does not broadcast it.
-- `value_types` — frozen compound types (like Color) that are replaced atomically
+- `value_types` — frozen compound types (like Color) that are replaced atomically. A handle type carries `"handle": { "strength": ... }`. A field whose type is a union of value types exports as an inlined `anyOf`/`oneOf` (with a `discriminator` when the server declared one); it is still one atomic value on the wire.
 - `root_type` — the type name of the root node
 
 #### `snapshot`
@@ -180,16 +181,23 @@ Sent after every committed transaction.
 
 #### `error`
 
-Sent to the client that caused an error.
+Sent to one client when its request could not be applied. Nothing is broadcast.
 
 ```json
-{
-  "type": "error",
-  "ref": "msg-123",
-  "code": "invalid_op",
-  "message": "Unknown node type: 'Bogus'"
-}
+{ "type": "error", "ref": "op-17", "code": "rejected", "message": "Cannot delete node 'x': still referenced by Volume.transform on node 'y'" }
 ```
+
+`code` is one of:
+
+- `unknown_type` — unrecognized message type.
+- `invalid_op` — malformed request (missing fields, unknown node type).
+- `rejected` — a well-formed request that is invalid against the current
+  document: a reference that does not resolve, a node that is still
+  referenced, a validation failure, or a target that another client deleted
+  first. The server rolled the request back and no `patch` was sent. A
+  `snapshot` follows immediately, for this client only, so an optimistic
+  (thick) client can replace its local document with the server's state.
+  Thin clients simply reload the store.
 
 ### Client → Server
 

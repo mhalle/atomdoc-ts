@@ -7,6 +7,7 @@
 
 import type {
   AtomDocSchema,
+  HandleDef,
   JsonDoc,
   RefDef,
   WireOperations,
@@ -123,6 +124,43 @@ export class LocalDoc {
       if (referrer) {
         seen.add(referrerId);
         result.push(referrer);
+      }
+    }
+    return result;
+  }
+
+  // --- Handles ---
+
+  /**
+   * Every handle held by the document. With `strength: "strong"` this is
+   * the document's hard dependency list — what must resolve for it to be
+   * usable. Nothing is fetched; values are read off the tree.
+   */
+  handles(strength?: "weak" | "strong"): Array<{
+    node: DocNode;
+    field: string;
+    handle: Record<string, unknown>;
+    strength: "weak" | "strong";
+  }> {
+    const result: Array<{
+      node: DocNode;
+      field: string;
+      handle: Record<string, unknown>;
+      strength: "weak" | "strong";
+    }> = [];
+    for (const node of this.nodeMap.values()) {
+      const defs: Record<string, HandleDef> = this.schema.node_types[node.type]?.handles ?? {};
+      for (const [field, def] of Object.entries(defs)) {
+        if (strength !== undefined && def.strength !== strength) continue;
+        const value = node.state[field];
+        if (value && typeof value === "object" && !Array.isArray(value)) {
+          result.push({
+            node,
+            field,
+            handle: value as Record<string, unknown>,
+            strength: def.strength,
+          });
+        }
       }
     }
     return result;

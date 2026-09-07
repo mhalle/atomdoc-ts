@@ -31,6 +31,17 @@ with atomdoc >= 0.3.0.
   of the declared type, and a referenced node cannot be deleted (policy
   `restrict`). Violations throw `RefIntegrityError` and roll the
   transaction back. Moving a node is not a delete.
+- **Handles.** `defineHandle(name, strength)`; node types export a
+  `handles` block and value types a `handle.strength`;
+  `SchemaRegistry.getHandles()`; `LocalDoc.handles(strength?)` lists the
+  document's dependencies without resolving them.
+- **Tagged unions.** `SchemaRegistry` builds `z.union` for `anyOf` /
+  `oneOf` properties (Python unions of frozen value types, Optionals).
+- **Resync after rejection.** The server now answers a request that is
+  invalid against the current document with error code `rejected` followed
+  by a fresh `snapshot`. `ThickAtomDocClient` rebuilds the local doc, store,
+  and undo history from any snapshot received after the first, drops pending
+  ops, and fires `onResync`.
 - **Transaction flags.** `ChangeEvent.flags` (`TransactionFlags`);
   `LocalDoc.applyOperations(ops, { skipUndo: true })` runs operations in a
   transaction the undo manager ignores (any open transaction is committed

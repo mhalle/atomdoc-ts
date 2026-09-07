@@ -184,6 +184,12 @@ const schema = buildSchema("Page", [Page, Annotation], [Color]);
 // schema is identical in format to Python's doc.atomdoc_schema()
 ```
 
+Handles name things outside the document. `defineHandle(name, strength)`
+builds a frozen `uri` / `media_type` / `digest` value type; put it on a
+field with `tier: "atomic"` and the node type exports a `handles` block.
+`doc.handles("strong")` on a `LocalDoc` is the dependency list a consumer
+checks before opening a document.
+
 A `ref` field is the TypeScript spelling of Python's `Ref[T]` (`many: true`
 for `list[Ref[T]]`). Slots are ownership; references are association and
 never control a node's lifetime. `LocalDoc` keeps a reverse index
@@ -391,6 +397,8 @@ edits keep their undo entry.
 client.onConnected(() => { ... });     // initial load complete
 client.onPatch((version) => { ... });  // remote change applied
 client.onError((err) => { ... });      // server error
+client.onResync(() => { ... });        // server replaced the local doc with a
+                                       // fresh snapshot after rejecting an op
 client.onOffline(() => { ... });       // connection lost
 client.onOnline(() => { ... });        // reconnected
 ```

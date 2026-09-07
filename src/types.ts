@@ -146,6 +146,17 @@ export interface RefDef {
   policy: "restrict";
 }
 
+/**
+ * A handle field: a frozen value naming something outside the document
+ * (bulk data, another document, an ontology term). `strength` says whether
+ * the document is usable without resolving it ("weak") or not ("strong").
+ */
+export interface HandleDef {
+  /** Name of the value type (a `Handle` subclass in Python). */
+  value_type: string;
+  strength: "weak" | "strong";
+}
+
 export interface NodeTypeDef {
   json_schema: Record<string, unknown>;
   /** Field name → "mergeable" | "atomic" | "opaque" | "ref". */
@@ -154,11 +165,15 @@ export interface NodeTypeDef {
   field_defaults: Record<string, unknown>;
   /** Reference fields (tier "ref"), keyed by field name. */
   refs?: Record<string, RefDef>;
+  /** Handle fields, keyed by field name. */
+  handles?: Record<string, HandleDef>;
 }
 
 export interface ValueTypeDef {
   json_schema: Record<string, unknown>;
   frozen: boolean;
+  /** Present when the value type is a handle. */
+  handle?: { strength: "weak" | "strong" };
 }
 
 export interface AtomDocSchema {

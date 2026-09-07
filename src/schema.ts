@@ -3,7 +3,7 @@
  */
 
 import { z } from "zod";
-import type { AtomDocSchema, NodeTypeDef, RefDef, ValueTypeDef } from "./types.js";
+import type { AtomDocSchema, HandleDef, NodeTypeDef, RefDef, ValueTypeDef } from "./types.js";
 
 export class SchemaRegistry {
   private nodeTypes: Map<string, NodeTypeDef>;
@@ -44,6 +44,11 @@ export class SchemaRegistry {
   /** The reference declaration of one field, if it is a ref. */
   getRef(nodeType: string, field: string): RefDef | undefined {
     return this.nodeTypes.get(nodeType)?.refs?.[field];
+  }
+
+  /** Handle fields of a node type, keyed by field name. */
+  getHandles(nodeType: string): Record<string, HandleDef> {
+    return this.nodeTypes.get(nodeType)?.handles ?? {};
   }
 
   getDefaults(nodeType: string): Record<string, unknown> {
@@ -125,6 +130,23 @@ function jsonSchemaToZod(jsonSchema: Record<string, unknown>): z.ZodType {
   if (type === "array") {
     const items = (jsonSchema.items ?? {}) as Record<string, unknown>;
     return z.array(jsonSchemaToZod(items));
+  }
+  const variants = (jsonSchema.oneOf ?? jsonSchema.anyOf) as
+    | Record<string, unknown>[]
+    | undefined;
+  if (Array.isArray(variants) && variants.length > 0) {
+    // A tagged union of value types (Python: `A | B` of frozen models,
+    // optionally with a discriminator), or an Optional (`X | null`).
+    const options = variants.map(jsonSchemaToZod);
+    let u: z.ZodType =
+      options.length === 1
+        ? options[0]
+        : z.union(options as [z.ZodType, z.ZodType, ...z.ZodType[]]);
+    if ("default" in jsonSchema) u = u.default(jsonSchema.default as never);
+    return u;
+  }
+  if (type === "null") {
+    return z.null();
   }
   if (type === "object" || jsonSchema.properties) {
     const properties = (jsonSchema.properties ?? {}) as Record<

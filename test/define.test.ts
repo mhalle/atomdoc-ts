@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { defineNode, defineValue, buildSchema } from "../src/define.js";
+import { defineNode, defineValue, defineHandle, buildSchema } from "../src/define.js";
 import { SchemaRegistry } from "../src/schema.js";
 import { LocalDoc } from "../src/thick/local-doc.js";
 import { getSlotChildren } from "../src/thick/doc-node.js";
@@ -241,5 +241,73 @@ describe("ref fields", () => {
     expect(Object.keys(registry.getRefs("Transform"))).toEqual(["parent"]);
     expect(registry.getRefs("Scene")).toEqual({});
     expect(registry.getFieldTier("Volume", "sources")).toBe("ref");
+  });
+});
+
+describe("handles and unions", () => {
+  const VoxelData = defineHandle("VoxelData", "strong");
+  const Term = defineHandle("Term");
+  const Volume = defineNode("Volume", {
+    data: { type: "object", schema: VoxelData, tier: "atomic", default: null },
+    term: { type: "object", schema: Term, tier: "atomic", default: null },
+  });
+  const built = buildSchema("Volume", [Volume], [VoxelData, Term]);
+
+  it("exports handle strength per field and per value type", () => {
+    expect(built.node_types.Volume.handles).toEqual({
+      data: { value_type: "VoxelData", strength: "strong" },
+      term: { value_type: "Term", strength: "weak" },
+    });
+    expect(built.value_types.VoxelData.handle).toEqual({ strength: "strong" });
+    expect(built.value_types.VoxelData.frozen).toBe(true);
+    expect(Object.keys(built.value_types.VoxelData.json_schema.properties as object)).toEqual([
+      "uri", "media_type", "digest",
+    ]);
+    expect(new SchemaRegistry(built).getHandles("Volume").data.strength).toBe("strong");
+  });
+
+  it("LocalDoc lists handles by strength", () => {
+    const doc = new LocalDoc(built, [
+      "01jqp00000000000000000000",
+      "Volume",
+      { data: { uri: "s3://a", media_type: "", digest: "" }, term: null },
+    ]);
+    expect(doc.handles("strong").map((h) => [h.field, h.handle.uri])).toEqual([["data", "s3://a"]]);
+    expect(doc.handles("weak")).toEqual([]);
+    expect(doc.handles().length).toBe(1);
+  });
+
+  it("validates a tagged union of value types from an inlined oneOf", () => {
+    const unionSchema: AtomDocSchema = {
+      version: 1,
+      root_type: "Override",
+      node_types: {
+        Override: {
+          json_schema: {
+            type: "object",
+            properties: {
+              value: {
+                oneOf: [
+                  { type: "object", properties: { kind: { type: "string" }, v: { type: "number" } } },
+                  { type: "object", properties: { kind: { type: "string" }, v: { type: "array", items: { type: "number" } } } },
+                ],
+                default: { kind: "scalar", v: 0 },
+              },
+              maybe: { anyOf: [{ type: "string" }, { type: "null" }] },
+            },
+          },
+          field_tiers: { value: "atomic", maybe: "mergeable" },
+          slots: {},
+          field_defaults: { value: { kind: "scalar", v: 0 } },
+        },
+      },
+      value_types: {},
+    };
+    const registry = new SchemaRegistry(unionSchema);
+    expect(registry.validate("Override", { value: { kind: "vec", v: [1, 2, 3] }, maybe: null })).toEqual({
+      value: { kind: "vec", v: [1, 2, 3] },
+      maybe: null,
+    });
+    expect(() => registry.validate("Override", { value: { kind: "vec", v: "x" }, maybe: 1 })).toThrow();
   });
 });

@@ -29,7 +29,7 @@
  *   const schema = buildSchema("Page", [Page, Annotation], [Color]);
  */
 
-import type { AtomDocSchema, NodeTypeDef, RefDef, ValueTypeDef } from "./types.js";
+import type { AtomDocSchema, HandleDef, NodeTypeDef, RefDef, ValueTypeDef } from "./types.js";
 
 // ---------------------------------------------------------------------------
 // Field definition
@@ -61,6 +61,11 @@ export interface FieldDef {
   target?: string | null;
   /** For ref fields: the value is an array of node IDs. */
   many?: boolean;
+  /**
+   * For object fields whose value type is a handle: how much the document
+   * depends on it. Exported in the node type's `handles` block.
+   */
+  strength?: "weak" | "strong";
 }
 
 // ---------------------------------------------------------------------------
@@ -71,18 +76,43 @@ export interface ValueDef {
   name: string;
   fields: Record<string, FieldDef>;
   frozen: boolean;
+  /** Set when the value type is a handle to something outside the document. */
+  handle?: { strength: "weak" | "strong" };
 }
 
 export function defineValue(
   name: string,
   fields: Record<string, FieldDef>,
-  options: { frozen?: boolean } = {},
+  options: { frozen?: boolean; handle?: { strength: "weak" | "strong" } } = {},
 ): ValueDef {
   return {
     name,
     fields,
     frozen: options.frozen ?? true,
+    ...(options.handle ? { handle: options.handle } : {}),
   };
+}
+
+/**
+ * A handle value type: `uri` plus optional `media_type` and `digest`,
+ * matching Python's `atomdoc.Handle`. Subclass-equivalent: pass a name and
+ * the strength.
+ */
+export function defineHandle(
+  name: string,
+  strength: "weak" | "strong" = "weak",
+  extraFields: Record<string, FieldDef> = {},
+): ValueDef {
+  return defineValue(
+    name,
+    {
+      uri: { type: "string" },
+      media_type: { type: "string", default: "" },
+      digest: { type: "string", default: "" },
+      ...extraFields,
+    },
+    { frozen: true, handle: { strength } },
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -146,9 +176,16 @@ function nodeDefToTypeDef(node: NodeDef): NodeTypeDef {
   const fieldTiers: Record<string, string> = {};
   const fieldDefaults: Record<string, unknown> = {};
   const refs: Record<string, RefDef> = {};
+  const handles: Record<string, HandleDef> = {};
 
   for (const [name, field] of Object.entries(node.fields)) {
     properties[name] = fieldToJsonSchema(field);
+    if (field.type === "object" && field.schema?.handle) {
+      handles[name] = {
+        value_type: field.schema.name,
+        strength: field.strength ?? field.schema.handle.strength,
+      };
+    }
     if (field.type === "ref") {
       fieldTiers[name] = "ref";
       refs[name] = {
@@ -175,6 +212,7 @@ function nodeDefToTypeDef(node: NodeDef): NodeTypeDef {
     slots,
     field_defaults: fieldDefaults,
     refs,
+    handles,
   };
 }
 
@@ -187,6 +225,7 @@ function valueDefToTypeDef(value: ValueDef): ValueTypeDef {
   return {
     json_schema: { type: "object", properties },
     frozen: value.frozen,
+    ...(value.handle ? { handle: value.handle } : {}),
   };
 }
 

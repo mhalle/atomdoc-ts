@@ -51,6 +51,7 @@ export class ThickAtomDocClient {
   private applyingRemote = false;
 
   private connectedCallbacks = new Set<() => void>();
+  private resyncCallbacks = new Set<() => void>();
   private errorCallbacks = new Set<(err: ErrorMsg) => void>();
   private patchCallbacks = new Set<(version: number) => void>();
   private offlineCallbacks = new Set<() => void>();
@@ -203,6 +204,18 @@ export class ThickAtomDocClient {
     return () => this.errorCallbacks.delete(cb);
   }
 
+  /**
+   * Fires when the server replaces the local document with a fresh
+   * snapshot after connecting — because it rejected one of this client's
+   * operations (error code `rejected`) or on reconnect. The local doc, store,
+   * and undo history are rebuilt from the snapshot; pending operations are
+   * dropped. UI that caches DocNode references must re-read them.
+   */
+  onResync(cb: () => void): () => void {
+    this.resyncCallbacks.add(cb);
+    return () => this.resyncCallbacks.delete(cb);
+  }
+
   onPatch(cb: (version: number) => void): () => void {
     this.patchCallbacks.add(cb);
     return () => this.patchCallbacks.delete(cb);
@@ -245,10 +258,15 @@ export class ThickAtomDocClient {
   private _initDoc(snapshot: JsonDoc, version: number): void {
     if (!this.rawSchema) return;
 
-    // Clean up previous doc
+    const isResync = this.doc !== null;
+
+    // Clean up previous doc. Anything in flight was either acknowledged
+    // (and is in the snapshot) or rejected (and is not).
     if (this.bridgeUnsub) this.bridgeUnsub();
     if (this.docUnsub) this.docUnsub();
     if (this.undoMgr) this.undoMgr.dispose();
+    this.pendingOps = [];
+    this.applyingRemote = false;
 
     this.version = version;
     this.doc = new LocalDoc(this.rawSchema, snapshot);
@@ -265,6 +283,9 @@ export class ThickAtomDocClient {
     });
 
     for (const cb of this.connectedCallbacks) cb();
+    if (isResync) {
+      for (const cb of this.resyncCallbacks) cb();
+    }
   }
 
   private _handlePatch(msg: PatchMsg): void {

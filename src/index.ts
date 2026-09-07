@@ -30,6 +30,7 @@ export type {
   ClientMsg,
   NodeTypeDef,
   RefDef,
+  HandleDef,
   ValueTypeDef,
   AtomDocSchema,
   JsonDoc,
@@ -37,6 +38,7 @@ export type {
 export {
   defineNode,
   defineValue,
+  defineHandle,
   buildSchema,
   type NodeDef,
   type ValueDef,
