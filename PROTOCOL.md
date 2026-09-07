@@ -206,13 +206,17 @@ Sent to one client when its request could not be applied. Nothing is broadcast.
 
 - `unknown_type` — unrecognized message type.
 - `invalid_op` — malformed request (missing fields, unknown node type).
+- `unsupported` — a request kind this session refuses (`undo`/`redo`
+  when the session's undo policy is `none`).
 - `rejected` — a well-formed request that is invalid against the current
   document: a reference that does not resolve, a node that is still
-  referenced, a validation failure, or a target that another client deleted
-  first. The server rolled the request back and no `patch` was sent. A
+  referenced, a validation failure, a target that another client deleted
+  first, or an undo step that no longer applies. The server rolled the
+  request back and no `patch` was sent. For an `op` or `create` a
   `snapshot` follows immediately, for this client only, so an optimistic
-  (thick) client can replace its local document with the server's state.
-  Thin clients simply reload the store.
+  (thick) client can replace its local document with the server's state;
+  thin clients simply reload the store. For an `undo`/`redo` nothing
+  follows: the client applied nothing optimistically and the step is kept.
 
 ### Client → Server
 
@@ -255,7 +259,19 @@ The server assigns the node ID. The client learns it from the resulting patch.
 { "type": "redo", "ref": "msg-126", "steps": 3 }
 ```
 
-`steps` defaults to 1 if omitted.
+`steps` defaults to 1 if omitted and must be a positive integer.
+
+What these revert depends on the session's undo policy. By default
+(`per-client`) the server keeps a history per connected client and an
+`undo` reverts only that client's own commits; another client's edits are
+untouched, and the client's redo survives them. A step that no longer
+applies because someone else edited what it would revert is answered with
+an `error` of code `rejected` and kept for a retry; no snapshot follows,
+since the client applied nothing optimistically. A client with nothing to
+undo gets no reply. Under the `global` policy an `undo` reverts the
+document's last commit, whoever made it. Under `none` the request is
+answered with code `unsupported`. The history is dropped when the client
+disconnects. Thick clients undo locally and never send these messages.
 
 **Note:** `ref` is optional on all client messages. If provided, it's echoed back in error responses for correlation.
 

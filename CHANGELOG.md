@@ -6,6 +6,15 @@ Thick-client parity with atomdoc (Python) 0.4.0, which ports the DocNode v0.4
 undo and lifecycle improvements from DocuKit. No wire protocol changes; works
 with atomdoc >= 0.3.0.
 
+### Changed
+
+- **Server undo is per-client by default.** atomdoc 0.4.0's `Session`
+  keeps an undo history per connected client, so a thin client's `undo`
+  reverts only its own commits — the same rule the thick client's local
+  undo already follows. A step that no longer applies comes back as
+  `error` code `rejected` with no snapshot; a session with undo disabled
+  answers `unsupported`. See PROTOCOL.md.
+
 ### Fixed
 
 - **`abort()` applied inverse operations in the wrong order** and bypassed
