@@ -627,17 +627,45 @@ on patch message:
   update version
   if msg.ref names one of my pending ops:
     forget that op and every pending op before it (the server answers in order)
-    if msg.source_client == my client_id:
-      skip (already applied locally)
-      return
+    reconcile(msg.operations)   # see below
+    return
   doc.applyOperations(msg.operations, skipUndo)  # apply as a remote change
 ```
 
-Matching by `ref` rather than by count matters when one request produces
-several patches (only the first is the verbatim echo) and after a resync,
-when the pending list was dropped and a late echo must be applied. An
+Ownership is the `ref`: only a ref this client minted can match. Do not
+require `source_client` as well — the server sets it only when it recorded
+the request verbatim, and it is `null` precisely when the server placed an
+insert elsewhere or a normalizer changed something, which is when
+reconciliation matters. Matching by `ref` rather than by count matters when
+one request produces several patches and after a resync, when the pending
+list was dropped and a late echo must be applied as a remote change. An
 `error` carrying a pending `ref` forgets that op too. The `client_id` comes
 from the `snapshot` message.
+
+**Reconciling an echo.** The local document applied the operation before
+the server did. If another change landed on the server in between, the
+server's order is "theirs, then ours", and simply skipping the echo leaves
+the client at "ours, then theirs" — the two diverge for good when both
+touched the same field or slot. The echo describes the server's result,
+so the client replays it as corrections, with `skipUndo` and without
+sending anything back:
+
+- each state field is set to the value in the echo (idempotent when
+  nothing intervened; a later pending edit of ours on the same field is
+  restored by its own echo);
+- each node the echo inserts is *moved* to the neighbours the echo
+  names (`prev`, else `next`, else the end of the slot), which is where
+  the server placed it; re-inserting would fail on the duplicate ID. A
+  node the client does not have (a server-side normalizer added it) is
+  inserted there instead;
+- each move in the echo replays as it is; deletes need nothing.
+
+This converges every interleaving of one client with host-side changes
+(a device writing into the session's document) and covers most
+two-client interleavings. What it does not do is rebase later pending
+edits over an intervening remote change to the *same* field: the client
+shows the remote value until its own echo arrives. Applications where
+devices and users own disjoint fields never hit that window.
 
 #### 13. Remote Echo Guard
 

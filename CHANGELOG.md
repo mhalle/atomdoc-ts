@@ -52,6 +52,16 @@ with atomdoc >= 0.3.0.
   observers: every listener runs, the commit stands, events are copies,
   and failures are thrown afterwards as `ListenerError` (with `errors`
   and `cause`). An undo whose observer fails is not put back.
+- **Concurrent edits could diverge for good.** A client that wrote a
+  field, received an earlier host-side or remote write to the same field,
+  and then skipped its own echo stayed at the remote value while the
+  server kept the client's. An echo is now reconciled instead of
+  skipped: state fields are set to the echoed values and inserted nodes
+  are moved to the neighbours the server recorded, so the local document
+  converges on the server's order. A convergence harness
+  (`test/integration/convergence.test.ts`) drives a real thick client
+  against the real Python session while a fake device commits host-side
+  changes, with disjoint and overlapping ownership of fields and nodes.
 - **Another client's acknowledgement could retire this client's pending
   work.** Refs were `op-N` in every client, and a patch's `ref` was
   matched before its source was checked. Refs are now

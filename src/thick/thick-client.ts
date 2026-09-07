@@ -14,6 +14,7 @@ import type {
   ClientMsg,
   ErrorMsg,
   JsonDoc,
+  OrderedOp,
   PatchMsg,
   ServerMsg,
   WireOperations,
@@ -28,6 +29,36 @@ export interface ThickClientOptions {
   maxUndoSteps?: number;
   /** Merge consecutive local transactions within this many ms into one undo step. Default 0. */
   mergeInterval?: number;
+}
+
+/**
+ * The operations that bring a local document, which already applied the
+ * request optimistically, to what the server recorded for it (`echo`):
+ * a node the echo inserts is moved to the echoed neighbours if the client
+ * has it, or inserted there if it does not (a server-side normalizer
+ * added it); moves replay as they are; deletes need nothing; state
+ * patches replay as they are.
+ */
+function echoReconcileOps(doc: LocalDoc, echo: WireOperations): WireOperations {
+  const ordered: OrderedOp[] = [];
+  for (const op of echo.ordered) {
+    if (op[0] === 0) {
+      const [, pairs, parentId, slotName, prevId, nextId] = op;
+      let prev: string | 0 = prevId;
+      for (const [id, type] of pairs) {
+        const next = prev ? 0 : nextId;
+        if (doc.getNode(id)) {
+          ordered.push([2, id, 0, parentId, slotName, prev, next]);
+        } else {
+          ordered.push([0, [[id, type]], parentId, slotName, prev, next]);
+        }
+        prev = id;
+      }
+    } else if (op[0] === 2) {
+      ordered.push(op);
+    }
+  }
+  return { ordered, state: echo.state };
 }
 
 export class ThickAtomDocClient {
@@ -365,10 +396,31 @@ export class ThickAtomDocClient {
 
     // A patch carrying one of our refs answers that request (and any
     // earlier one still pending: the server handles requests in order).
+    // Only refs we minted match, so this is ownership enough;
+    // `source_client` is informational (it is null whenever the server
+    // recorded the request differently from how we sent it, which is
+    // exactly the case reconciliation exists for).
     const answersOurs = typeof msg.ref === "string" && this._dropPending(msg.ref);
 
-    if (msg.source_client === this.clientId && answersOurs) {
-      // Self-echo of an op we applied locally: just update version.
+    if (answersOurs) {
+      // Our own request, as the server recorded it. We applied it
+      // optimistically; if another change landed on the server first,
+      // the server's order is "theirs, then ours", and the patch
+      // describes the result: each state field is set to the value the
+      // server holds, and each node we inserted is moved to the
+      // neighbours the server placed it between. That converges the
+      // local document on the server's order. A later pending edit of
+      // ours on the same field is restored by its own echo. Nothing
+      // here is sent back or undoable.
+      const reconcile = echoReconcileOps(this.doc!, msg.operations);
+      if (this.doc && (reconcile.ordered.length > 0 || Object.keys(reconcile.state).length > 0)) {
+        this.applyingRemote = true;
+        try {
+          this.doc.applyOperations(reconcile, { skipUndo: true });
+        } finally {
+          this.applyingRemote = false;
+        }
+      }
     } else {
       // Remote change — or our own op echoed after a resync dropped the
       // pending list (the snapshot predates it), or a commit the server

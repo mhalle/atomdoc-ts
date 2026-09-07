@@ -411,6 +411,66 @@ describe("second review: thick client", () => {
     });
   });
 
+  it("converges on the server's order when a remote change lands before our echo", async () => {
+    await withFakeWebSocket(async () => {
+      const c = new ThickAtomDocClient({ url: "ws://x" });
+      const p = c.connect();
+      const ws = FakeWS.instances[0];
+      ws.onopen?.();
+      await p;
+      boot(ws);
+      // The reviewer's case: we write "mine", a device wrote "theirs" just
+      // before on the server, so the server ends at "mine".
+      c.setField("a", "name", "mine");
+      const [op1] = sentOps(ws);
+      ws.deliver({
+        type: "patch", version: 1, source_client: null, ref: null,
+        operations: { ordered: [], state: { a: { name: "theirs" } } },
+      });
+      expect(c.getDoc()!.getNode("a")!.state.name).toBe("theirs");
+      ws.deliver({
+        type: "patch", version: 2, source_client: "me", ref: op1.ref,
+        operations: { ordered: [], state: { a: { name: "mine" } } },
+      });
+      expect(c.getDoc()!.getNode("a")!.state.name).toBe("mine");
+      expect(c.getStore().getNode("a")!.state.name).toBe("mine");
+      expect(sentOps(ws).length).toBe(1); // the reconcile is not sent back
+      expect(c.getUndoManager()!.canUndo).toBe(true); // and not a new undo step
+
+      // Ordering: we append "u" after "d"; the device appended "x" after
+      // "d" first, so the server placed "u" between "d" and "x".
+      const uId = c.createNode("Item", { name: "u" }, c.getDoc()!.root.id, "children");
+      const [, op2] = sentOps(ws);
+      ws.deliver({
+        type: "patch", version: 3, source_client: null, ref: null,
+        operations: { ordered: [[0, [["x", "Item"]], 0, "children", "d", 0]], state: {} },
+      });
+      expect(ids(c.getDoc()!)).toEqual(["a", "b", "c", "d", "x", uId]);
+      // The server recorded the insert with a different neighbour than we
+      // sent, so it is not a verbatim echo: source_client is null, but
+      // the ref is ours and that is what identifies our request.
+      ws.deliver({
+        type: "patch", version: 4, source_client: null, ref: op2.ref,
+        operations: { ordered: [[0, [[uId, "Item"]], 0, "children", "d", "x"]], state: { [uId]: { name: "u" } } },
+      });
+      expect(ids(c.getDoc()!)).toEqual(["a", "b", "c", "d", uId, "x"]);
+      expect(sentOps(ws).length).toBe(2);
+      expect((c as unknown as { pendingOps: unknown[] }).pendingOps).toEqual([]);
+      // A node a server-side normalizer added alongside ours is inserted.
+      c.setField("a", "name", "again");
+      const [, , op3] = sentOps(ws);
+      ws.deliver({
+        type: "patch", version: 5, source_client: null, ref: op3.ref,
+        operations: {
+          ordered: [[0, [["norm", "Item"]], 0, "children", 0, "a"]],
+          state: { a: { name: "again" }, norm: { name: "n" } },
+        },
+      });
+      expect(ids(c.getDoc()!)).toEqual(["norm", "a", "b", "c", "d", uId, "x"]);
+      expect(c.getDoc()!.getNode("norm")!.state.name).toBe("n");
+    });
+  });
+
   it("fires online callbacks after the reconnect snapshot is applied", async () => {
     await withFakeWebSocket(async () => {
       const c = new ThickAtomDocClient({ url: "ws://x" });
