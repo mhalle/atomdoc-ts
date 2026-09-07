@@ -16,12 +16,15 @@
 - **Echo reconciliation dropped the echo's `next` neighbor**, so a
   verbatim echo whose `prev` was deleted locally meanwhile appended the
   node to the end instead of leaving it in place.
-- **A move or write the server found already satisfied got no reply**, so
-  the requester's pending op never retired and its slot order could stay
-  wrong for good. The server now answers such a request alone with the
-  slot's real order (see PROTOCOL.md, "A request that changes nothing").
-  A two-thick-client convergence harness (`test/integration/two-clients.
-  test.ts`) covers concurrent moves, creates, deletes and writes.
+- **Concurrent moves could leave two clients in different orders for
+  good.** A remote move anchored at a node the client had a pending move
+  for was vacuous in the client's frame while real on the server, and a
+  move the server found already satisfied got no reply at all. The
+  server now follows every move echo, and answers every no-op request,
+  with the touched slot's full order for the requester (see PROTOCOL.md,
+  "Slot-order corrections"). A two-thick-client convergence harness
+  (`test/integration/two-clients.test.ts`) covers concurrent moves,
+  creates, deletes and writes with and without a host-side device.
 - **Filling a slot node by node through the thin store was quadratic.**
   `applyPatch` copied the parent's child array on every insert, delete
   or move. A patch now edits each touched child list once and writes it

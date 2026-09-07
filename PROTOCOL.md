@@ -682,20 +682,26 @@ client refreshes the recorded original of the oldest pending edit of
 that field to the masked value, in the undo entry that edit landed in
 (merged entries included).
 
-**A request that changes nothing.** A move the server finds already
-satisfied, or a write of the value already held, commits nothing and so
-produces no broadcast. The requester still applied it optimistically and
-must learn where the server stands, so the server answers it alone with a
-`patch` at the *current* version (no increment) carrying the request's
-`ref` and `source_client: null`: for every slot the request's inserts or
-moves touched, the slot's full order as a chain of moves (append the
-first node, then each node after its predecessor), and for every state
-entry the value as stored. The whole slot is sent because a request that
-was vacuous on the server usually means the requester's picture of the
-slot differs in more than the moved node: a remote move it applied in
-between was vacuous in its own frame. Applying the chain is a no-op for
-nodes already in place. A client must accept a patch whose version equals
-its current one.
+**Slot-order corrections.** Neighbor-relative moves are the one place
+where a client's optimistic frame can silently disagree with the
+server's: a remote move anchored at a node the client has a pending move
+for is vacuous in the client's frame (the anchor already sits where the
+move would put it) while it is real on the server. Masking cannot help,
+because the remote move must be applied for its own node. So after the
+echo of every `op` that contains a move, the server sends the requester
+alone a second `patch` at the *same* version carrying the request's `ref`
+and `source_client: null`: for every slot the request moved into, the
+slot's full order as a chain of moves (append the first node, then each
+node after its predecessor). Applying the chain is a no-op for nodes
+already in place and a correction for the rest; nodes with a later
+pending move of the client's own are masked and corrected by their own
+echo. The same message answers a request that changed nothing on the
+server (a move to where the node already is, a write of the value already
+held, which commit nothing and so produce no echo), then also carrying
+the stored values of the state entries. A client must accept a patch
+whose version equals its current one; the correction reaches it with its
+pending entry already retired by the echo, so it applies as a remote
+change.
 
 Reconciliation never re-inserts a node that a still-pending op of the
 client's own deleted (create then delete before the create's echo): the

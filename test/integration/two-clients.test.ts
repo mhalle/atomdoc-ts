@@ -101,10 +101,21 @@ async function runScenario(mix: Mix, port: number, seed: number, device: boolean
   });
   const rng = mulberry32(seed);
   const clients = [await connect(url), await connect(url)];
-  const stats = clients.map(() => ({ errors: [] as string[], resyncs: 0, ops: 0 }));
+  const stats = clients.map(() => ({ errors: [] as string[], resyncs: 0, ops: 0, order: [] as string[] }));
   clients.forEach((c, i) => {
     c.onError((e) => stats[i].errors.push(e.code));
-    c.onResync(() => stats[i].resyncs++);
+    // Every client must see versions in order: a patch never carries a
+    // version below the last one seen (a no-op echo repeats it), and a
+    // resync snapshot is never followed by a patch it already contains.
+    let last = c.getVersion();
+    c.onResync(() => {
+      stats[i].resyncs++;
+      last = c.getVersion();
+    });
+    c.onPatch((version) => {
+      if (version < last) stats[i].order.push(`v${version} after v${last}`);
+      last = Math.max(last, version);
+    });
   });
 
   const step = (c: ThickAtomDocClient, i: number, k: number) => {
@@ -165,7 +176,8 @@ async function runScenario(mix: Mix, port: number, seed: number, device: boolean
   const context = `mix=${mix} seed=${seed} device=${device} ` + stats
     .map((s, i) => `c${i}:{ops=${s.ops},resyncs=${s.resyncs},errors=${s.errors.join("|")}}`)
     .join(" ");
-  for (const c of clients) {
+  for (const [i, c] of clients.entries()) {
+    expect(stats[i].order, context).toEqual([]);
     expect(c.getVersion(), context).toBe(snap.version);
     expect(c.getDoc()!.toSnapshot(), context).toEqual(snap.data);
   }
