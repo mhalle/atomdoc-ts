@@ -467,7 +467,7 @@ For creating nodes offline. Port of the Lamport timestamp system.
 
 Format: `{sessionId}.{clock}`
 
-- `sessionId` = base64(elapsed_ms_since_doc_creation) + random(3 chars)
+- `sessionId` = base64(elapsed_ms_since_doc_creation) + random(5 chars)
 - `clock` = monotonically incrementing base64 counter, starts at `"-"` (first char of alphabet)
 
 Base64 alphabet (RFC 4648 §5, lexicographically sorted):

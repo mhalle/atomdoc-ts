@@ -75,7 +75,7 @@ export function createNodeIdFactory(docId: string): () => string {
   const createdAtMs = ulidToMs(docId);
   const msPassed = Math.max(0, Date.now() - createdAtMs);
   const msBase64 = numberToBase64(msPassed);
-  const randomPart = randomBase64(3);
+  const randomPart = randomBase64(5);
   const sessionId = msBase64 + randomPart;
 
   let clock = FIRST_CHAR;

@@ -20,6 +20,9 @@ with atomdoc >= 0.3.0.
 
 ### Added
 
+- **Node ID sessions carry 5 random characters instead of 3**, matching
+  atomdoc 0.4.0. Same-millisecond session collisions drop from 1 in
+  262,144 to 1 in ~1.07 billion; IDs grow by two characters.
 - **References.** Field type `"ref"` in `defineNode` (`target`, `many`),
   exported as tier `"ref"` plus a `refs` block, matching atomdoc 0.4.0's
   `Ref[T]`. `SchemaRegistry.getRefs()` / `getRef()`. `LocalDoc` keeps a
