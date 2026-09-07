@@ -22,7 +22,6 @@ import {
   onInsertRangeBefore,
   onDeleteRange,
   onMoveRange,
-  applyOperations,
   type OpsAccumulator,
   type Diff,
 } from "./local-ops.js";
@@ -308,6 +307,19 @@ export class LocalDoc {
     if (nodes.length === 0) return;
 
     withTransaction(this, () => {
+      // A node (or ID) may enter the document once: the same node twice in
+      // one batch would link it to itself, an existing ID would shadow a
+      // live node.
+      const seen = new Set<string>();
+      for (const top of nodes) {
+        for (const desc of descendantsInclusive(top)) {
+          if (this.nodeMap.has(desc.id) || seen.has(desc.id)) {
+            throw new Error(`Node '${desc.id}' already exists in the document`);
+          }
+          seen.add(desc.id);
+        }
+      }
+
       // Handle position redirects
       if (position === "prepend") {
         const first = parent.slotFirst.get(slotName) ?? null;
@@ -503,103 +515,109 @@ export class LocalDoc {
    * undo manager ignores; any open transaction is committed first.
    */
   applyOperations(ops: WireOperations, flags?: TransactionFlags): void {
-    withTransaction(
-      this,
-      () => {
-        // Apply ordered operations through tracked methods
-        for (const op of ops.ordered) {
-          try {
-            if (op[0] === 0) {
-              // Insert
-              const nodePairs = op[1] as [string, string][];
-              const parentIdRaw = op[2];
-              const slotName = op[3] as string;
-              const prevId = op[4];
-              const nextId = op[5];
-
-              const parent = parentIdRaw === 0
-                ? this.root
-                : this.nodeMap.get(String(parentIdRaw));
-              if (!parent) continue;
-
-              const nodes = nodePairs.map(([id, type]) => {
-                const n = this.createNode(type);
-                (n as { id: string }).id = id;
-                this.nodeMap.set(id, n);
-                return n;
-              });
-
-              if (prevId) {
-                const prev = this.nodeMap.get(String(prevId));
-                if (prev) {
-                  this.insertIntoSlot(parent, slotName, "after", nodes, prev);
-                  continue;
-                }
-              }
-              if (nextId) {
-                const next = this.nodeMap.get(String(nextId));
-                if (next) {
-                  this.insertIntoSlot(parent, slotName, "before", nodes, next);
-                  continue;
-                }
-              }
-              this.insertIntoSlot(parent, slotName, "append", nodes);
-
-            } else if (op[0] === 1) {
-              // Delete
-              const startId = op[1] as string;
-              const endIdRaw = op[2];
-              const endId = endIdRaw === 0 ? undefined : String(endIdRaw);
-              this.deleteRange(startId, endId);
-
-            } else if (op[0] === 2) {
-              // Move
-              const startId = op[1] as string;
-              const endIdRaw = op[2];
-              const parentIdRaw = op[3];
-              const slotName = op[4] as string;
-              const prevIdRaw = op[5];
-              const nextIdRaw = op[6];
-              const endId = endIdRaw === 0 ? undefined : String(endIdRaw);
-              const parentId = parentIdRaw === 0 ? "" : String(parentIdRaw);
-              if (prevIdRaw && this.nodeMap.has(String(prevIdRaw))) {
-                this.moveRangeRelative(startId, endId, String(prevIdRaw), "after");
-              } else if (nextIdRaw && this.nodeMap.has(String(nextIdRaw))) {
-                this.moveRangeRelative(startId, endId, String(nextIdRaw), "before");
-              } else {
-                this.moveRange(startId, endId, parentId, slotName);
-              }
-            }
-          } catch {
-            // Skip failed ops (conflict)
-          }
-        }
-
-        // Apply state patches through tracking
-        for (const [nodeId, patches] of Object.entries(ops.state)) {
-          const node = this.nodeMap.get(nodeId);
-          if (!node) continue;
-          for (const [key, value] of Object.entries(patches)) {
-            const isAttached = this.nodeMap.has(nodeId);
-            if (isAttached) {
-              onSetStateInverse(this._diff, this._inverseOps, node, key);
-            }
-            const oldValue = node.state[key];
-            node.state[key] = value;
-            if (isAttached) {
-              onSetStateForward(this._diff, this._forwardOps, this._inverseOps, node, key);
-              if (key in this._refDefsFor(node.type)) {
-                this._refsUpdate(node, key, oldValue, value);
-              }
-            }
-          }
-        }
-      },
-      true, // isApplyOperations
-      flags,
-    );
+    withTransaction(this, () => this._applyOps(ops), true, flags);
     if (flags?.skipUndo && this._lifecycleStage === "update") {
       this.forceCommit();
+    }
+  }
+
+  /**
+   * Apply operations through the tracked mutators, inside whatever
+   * transaction is open. An operation whose target is missing is skipped
+   * (best effort: undo and rollback may legitimately meet a node that is
+   * gone). Shared by `applyOperations` and `abort`, so the reverse
+   * reference index is maintained on every path.
+   */
+  private _applyOps(ops: WireOperations): void {
+    for (const op of ops.ordered) {
+      try {
+        if (op[0] === 0) {
+          // Insert
+          const nodePairs = op[1] as [string, string][];
+          const parentIdRaw = op[2];
+          const slotName = op[3] as string;
+          const prevId = op[4];
+          const nextId = op[5];
+
+          const parent = parentIdRaw === 0
+            ? this.root
+            : this.nodeMap.get(String(parentIdRaw));
+          if (!parent) continue;
+
+          const nodes = nodePairs.map(([id, type]) => {
+            const n = this.createNode(type);
+            (n as { id: string }).id = id;
+            return n;
+          });
+
+          if (prevId) {
+            const prev = this.nodeMap.get(String(prevId));
+            if (prev) {
+              this.insertIntoSlot(parent, slotName, "after", nodes, prev);
+              continue;
+            }
+          }
+          if (nextId) {
+            const next = this.nodeMap.get(String(nextId));
+            if (next) {
+              this.insertIntoSlot(parent, slotName, "before", nodes, next);
+              continue;
+            }
+          }
+          this.insertIntoSlot(parent, slotName, "append", nodes);
+
+        } else if (op[0] === 1) {
+          // Delete
+          const startId = op[1] as string;
+          const endIdRaw = op[2];
+          const endId = endIdRaw === 0 ? undefined : String(endIdRaw);
+          if (!this.nodeMap.has(startId)) continue;
+          this.deleteRange(startId, endId);
+
+        } else if (op[0] === 2) {
+          // Move
+          const startId = op[1] as string;
+          const endIdRaw = op[2];
+          const parentIdRaw = op[3];
+          const slotName = op[4] as string;
+          const prevIdRaw = op[5];
+          const nextIdRaw = op[6];
+          const endId = endIdRaw === 0 ? undefined : String(endIdRaw);
+          const parentId = parentIdRaw === 0 ? "" : String(parentIdRaw);
+          if (!this.nodeMap.has(startId)) continue;
+          if (prevIdRaw && this.nodeMap.has(String(prevIdRaw))) {
+            this.moveRangeRelative(startId, endId, String(prevIdRaw), "after");
+          } else if (nextIdRaw && this.nodeMap.has(String(nextIdRaw))) {
+            this.moveRangeRelative(startId, endId, String(nextIdRaw), "before");
+          } else {
+            this.moveRange(startId, endId, parentId, slotName);
+          }
+        }
+      } catch {
+        // Skip failed ops (conflict)
+      }
+    }
+
+    // Apply state patches through tracking
+    for (const [nodeId, patches] of Object.entries(ops.state)) {
+      const node = this.nodeMap.get(nodeId);
+      if (!node) continue;
+      const defaults = this.schema.node_types[node.type]?.field_defaults ?? {};
+      for (const [key, value] of Object.entries(patches)) {
+        onSetStateInverse(this._diff, this._inverseOps, node, key);
+        const oldValue = node.state[key];
+        if (value === null && !(key in defaults)) {
+          // null for a field without a default means "unset" (that is how
+          // an unset field serializes), so restore it to unset.
+          delete node.state[key];
+        } else {
+          node.state[key] = value;
+        }
+        onSetStateForward(this._diff, this._forwardOps, this._inverseOps, node, key);
+        if (key in this._refDefsFor(node.type)) {
+          this._refsUpdate(node, key, oldValue, value);
+        }
+      }
     }
   }
 
@@ -610,7 +628,6 @@ export class LocalDoc {
       throw new Error("Cannot trigger an update inside a change event");
     }
 
-    this._inverseOps.ordered.reverse();
     this._lifecycleStage = "idle";
 
     // Fire listeners if there are changes
@@ -631,9 +648,14 @@ export class LocalDoc {
       }
 
       this._lifecycleStage = "change";
+      // Inverse ops are recorded in forward order; hand them out in
+      // application order.
       const event: ChangeEvent = {
         operations: opsToWire(this._forwardOps),
-        inverseOperations: opsToWire(this._inverseOps),
+        inverseOperations: {
+          ordered: [...this._inverseOps.ordered].reverse(),
+          state: this._inverseOps.state,
+        },
         diff: this._diff,
         flags: this._transactionFlags,
       };
@@ -659,25 +681,19 @@ export class LocalDoc {
   }
 
   abort(): void {
+    // Inverse ops are recorded in forward order; roll back in reverse,
+    // through the tracked mutators so the reverse reference index follows.
     const inverse: WireOperations = {
-      ordered: [...this._inverseOps.ordered],
+      ordered: [...this._inverseOps.ordered].reverse(),
       state: { ...this._inverseOps.state },
     };
-    applyOperations(
-      this.nodeMap,
-      this.root,
-      inverse,
-      (id, type) => {
-        const node = this.createNode(type);
-        (node as { id: string }).id = id;
-        this.nodeMap.set(id, node);
-        return node;
-      },
-      (parent, slot, position, nodes, target) => {
-        this.insertIntoSlot(parent, slot, position, nodes, target);
-      },
-    );
-    this._reset();
+    try {
+      this._applyOps(inverse);
+    } finally {
+      // Whatever happens, the document must not stay in the update stage.
+      this._reset();
+      this._rebuildRefIndex();
+    }
   }
 
   // --- Events ---

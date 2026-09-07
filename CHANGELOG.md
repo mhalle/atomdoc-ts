@@ -8,6 +8,50 @@ with atomdoc >= 0.3.0.
 
 ### Fixed
 
+- **`abort()` applied inverse operations in the wrong order** and bypassed
+  the reverse reference index. A throwing transaction body could delete a
+  pre-existing node for good, and after any rollback a still-referenced
+  node could be deleted. Rollback now runs in reverse through the tracked
+  mutators.
+- **A duplicate node ID was accepted and silently shadowed a live node.**
+  Rejected now, as is the same node twice in one insert.
+- **`NodeStore.loadSnapshot` notified nobody**, so a UI rendered stale
+  data after a resync. Every subscriber is notified; listeners of removed
+  nodes are dropped.
+- **An accepted op in flight behind a rejected one was lost.** Its echo
+  arrived after the resync snapshot and was skipped as a self-echo. Echoes
+  are skipped only while an op is pending; after a resync they apply.
+- **Offline edits were never replayed and `onOnline` never fired.**
+  Buffered operations are replayed as fresh local transactions once the
+  reconnect snapshot lands.
+- **The Zod converter dropped array/object defaults and enforced no
+  constraints.** It now handles `enum`, `const`, string and numeric
+  bounds, `prefixItems`, `additionalProperties`, `required`, and
+  discriminated unions, and a `null` default makes a field nullable.
+  `defineNode` fields take `nullable: true`; `defineValue` exports a
+  `required` list. The `defineNode` docstring example now validates.
+- **`abort()` applied inverse operations in the wrong order** and bypassed
+  the reverse reference index. A throwing transaction body could delete a
+  pre-existing node for good, and after any rollback a still-referenced
+  node could be deleted. Rollback now runs in reverse through the tracked
+  mutators.
+- **A duplicate node ID was accepted and silently shadowed a live node.**
+  Rejected now, as is the same node twice in one insert.
+- **`NodeStore.loadSnapshot` notified nobody**, so a UI rendered stale
+  data after a resync. Every subscriber is notified; listeners of removed
+  nodes are dropped.
+- **An accepted op in flight behind a rejected one was lost.** Its echo
+  arrived after the resync snapshot and was skipped as a self-echo. Echoes
+  are skipped only while an op is pending; after a resync they apply.
+- **Offline edits were never replayed and `onOnline` never fired.**
+  Buffered operations are replayed as fresh local transactions once the
+  reconnect snapshot lands.
+- **The Zod converter dropped array/object defaults and enforced no
+  constraints.** It now handles `enum`, `const`, string and numeric
+  bounds, `prefixItems`, `additionalProperties`, `required`, and
+  discriminated unions, and a `null` default makes a field nullable.
+  `defineNode` fields take `nullable: true`; `defineValue` exports a
+  `required` list. The `defineNode` docstring example now validates.
 - **Remote patches polluted local undo.** `ThickAtomDocClient` applied patches
   from other clients through the same path as local edits, so undo could
   revert another user's change. Remote patches are now applied with

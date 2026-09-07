@@ -177,6 +177,22 @@ Sent after every committed transaction.
 }
 ```
 
+`source_client` is the ID of the client whose request produced the patch, so
+a thick client can skip the echo of an operation it already applied. It is
+`null` when the commit carries more than that client sent (a server-side
+normalizer added or changed something), so the sender applies the patch
+like any remote change. A request that commits more than once (a multi-step
+`undo`) produces one `patch` per commit. A client that connects mid-request
+receives the change in its snapshot, not as a patch.
+
+`source_client` is the ID of the client whose request produced the patch, so
+a thick client can skip the echo of an operation it already applied. It is
+`null` when the commit carries more than that client sent — a server-side
+normalizer added or changed something — so the sender applies the patch
+like any remote change. A request that commits more than once (a multi-step
+`undo`) produces one `patch` per commit. A client that connects mid-request
+receives the change in its snapshot, not as a patch.
+
 `version` is a monotonically increasing integer. `source_client` identifies which client initiated the change.
 
 #### `error`

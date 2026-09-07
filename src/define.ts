@@ -21,7 +21,7 @@
  *   const Page = defineNode("Page", {
  *     title: { type: "string", default: "" },
  *     // A reference to another node in the same document (stored as its ID)
- *     cover: { type: "ref", target: "Annotation", default: null },
+ *     cover: { type: "ref", target: "Annotation", nullable: true, default: null },
  *   }, {
  *     slots: { annotations: "Annotation" },
  *   });
@@ -61,6 +61,11 @@ export interface FieldDef {
   target?: string | null;
   /** For ref fields: the value is an array of node IDs. */
   many?: boolean;
+  /**
+   * The field also accepts `null` (Python `X | None`). Implied by
+   * `default: null`; exported as `anyOf: [..., {type: "null"}]`.
+   */
+  nullable?: boolean;
   /**
    * For object fields whose value type is a handle: how much the document
    * depends on it. Exported in the node type's `handles` block.
@@ -142,6 +147,17 @@ export function defineNode(
 // ---------------------------------------------------------------------------
 
 function fieldToJsonSchema(field: FieldDef): Record<string, unknown> {
+  const base = fieldToJsonSchemaBase(field);
+  if (field.nullable || field.default === null) {
+    const { default: def, ...rest } = base;
+    const out: Record<string, unknown> = { anyOf: [rest, { type: "null" }] };
+    if (def !== undefined) out.default = def;
+    return out;
+  }
+  return base;
+}
+
+function fieldToJsonSchemaBase(field: FieldDef): Record<string, unknown> {
   if (field.type === "ref") {
     // A reference is a node ID on the wire.
     const result: Record<string, unknown> = field.many
@@ -218,12 +234,16 @@ function nodeDefToTypeDef(node: NodeDef): NodeTypeDef {
 
 function valueDefToTypeDef(value: ValueDef): ValueTypeDef {
   const properties: Record<string, Record<string, unknown>> = {};
+  const required: string[] = [];
   for (const [name, field] of Object.entries(value.fields)) {
     properties[name] = fieldToJsonSchema(field);
+    if (field.default === undefined) required.push(name);
   }
 
   return {
-    json_schema: { type: "object", properties },
+    json_schema: required.length > 0
+      ? { type: "object", properties, required }
+      : { type: "object", properties },
     frozen: value.frozen,
     ...(value.handle ? { handle: value.handle } : {}),
   };

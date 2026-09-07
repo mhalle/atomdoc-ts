@@ -99,65 +99,130 @@ export class SchemaRegistry {
 }
 
 /**
- * Convert a JSON Schema object (the subset atomdoc uses) to a Zod schema.
+ * Convert a JSON Schema object (the subset atomdoc exports) to a Zod schema.
  *
- * Supports: object with properties, string, number/integer, boolean,
- * arrays of primitives, nested objects, and defaults.
+ * Supports: string/integer/number/boolean/null, `enum`, `const`, string
+ * length and pattern constraints, numeric bounds, arrays (with `items`,
+ * `prefixItems`, `minItems`, `maxItems`), objects (with `properties`,
+ * `required`, `additionalProperties`), `anyOf`/`oneOf` unions (with a
+ * `discriminator` when every variant carries a literal for it), and
+ * `default`. A `null` default makes the schema nullable. An object without
+ * a `required` list keeps the earlier rule: a property is required unless
+ * it has a default.
  */
 function jsonSchemaToZod(jsonSchema: Record<string, unknown>): z.ZodType {
-  const type = jsonSchema.type as string | undefined;
+  return withDefault(jsonSchema, buildZod(jsonSchema));
+}
 
-  if (type === "string") {
-    let s: z.ZodType = z.string();
-    if ("default" in jsonSchema) s = (s as z.ZodString).default(jsonSchema.default as string);
-    return s;
+function withDefault(jsonSchema: Record<string, unknown>, schema: z.ZodType): z.ZodType {
+  if (!("default" in jsonSchema)) return schema;
+  const def = jsonSchema.default;
+  let out = schema;
+  if (def === null && !schema.isNullable()) out = out.nullable();
+  return out.default(def as never);
+}
+
+function literalOf(value: unknown): z.ZodType {
+  if (value === null) return z.null();
+  return z.literal(value as string | number | boolean);
+}
+
+function buildZod(jsonSchema: Record<string, unknown>): z.ZodType {
+  if ("const" in jsonSchema) return literalOf(jsonSchema.const);
+  if (Array.isArray(jsonSchema.enum)) {
+    const values = jsonSchema.enum as unknown[];
+    if (values.length === 1) return literalOf(values[0]);
+    if (values.every((v) => typeof v === "string")) {
+      return z.enum(values as [string, ...string[]]);
+    }
+    const lits = values.map(literalOf);
+    return z.union(lits as [z.ZodType, z.ZodType, ...z.ZodType[]]);
   }
-  if (type === "integer") {
-    let n: z.ZodType = z.number().int();
-    if ("default" in jsonSchema) n = (n as z.ZodNumber).default(jsonSchema.default as number);
-    return n;
-  }
-  if (type === "number") {
-    let n: z.ZodType = z.number();
-    if ("default" in jsonSchema) n = (n as z.ZodNumber).default(jsonSchema.default as number);
-    return n;
-  }
-  if (type === "boolean") {
-    let b: z.ZodType = z.boolean();
-    if ("default" in jsonSchema) b = (b as z.ZodBoolean).default(jsonSchema.default as boolean);
-    return b;
-  }
-  if (type === "array") {
-    const items = (jsonSchema.items ?? {}) as Record<string, unknown>;
-    return z.array(jsonSchemaToZod(items));
-  }
+
   const variants = (jsonSchema.oneOf ?? jsonSchema.anyOf) as
     | Record<string, unknown>[]
     | undefined;
   if (Array.isArray(variants) && variants.length > 0) {
-    // A tagged union of value types (Python: `A | B` of frozen models,
-    // optionally with a discriminator), or an Optional (`X | null`).
     const options = variants.map(jsonSchemaToZod);
-    let u: z.ZodType =
-      options.length === 1
-        ? options[0]
-        : z.union(options as [z.ZodType, z.ZodType, ...z.ZodType[]]);
-    if ("default" in jsonSchema) u = u.default(jsonSchema.default as never);
-    return u;
+    if (options.length === 1) return options[0];
+    const disc = jsonSchema.discriminator as { propertyName?: string } | undefined;
+    const key = disc?.propertyName;
+    const allTagged = key !== undefined && options.every(
+      (o) => o instanceof z.ZodObject && o.shape[key] instanceof z.ZodLiteral,
+    );
+    if (allTagged) {
+      return z.discriminatedUnion(
+        key as string,
+        options as unknown as [
+          z.ZodDiscriminatedUnionOption<string>,
+          ...z.ZodDiscriminatedUnionOption<string>[],
+        ],
+      );
+    }
+    return z.union(options as [z.ZodType, z.ZodType, ...z.ZodType[]]);
   }
-  if (type === "null") {
-    return z.null();
+
+  const type = jsonSchema.type as string | undefined;
+
+  if (type === "null") return z.null();
+  if (type === "string") {
+    let str = z.string();
+    if (typeof jsonSchema.minLength === "number") str = str.min(jsonSchema.minLength);
+    if (typeof jsonSchema.maxLength === "number") str = str.max(jsonSchema.maxLength);
+    if (typeof jsonSchema.pattern === "string") str = str.regex(new RegExp(jsonSchema.pattern));
+    return str;
+  }
+  if (type === "integer" || type === "number") {
+    let num = z.number();
+    if (type === "integer") num = num.int();
+    if (typeof jsonSchema.minimum === "number") num = num.min(jsonSchema.minimum);
+    if (typeof jsonSchema.maximum === "number") num = num.max(jsonSchema.maximum);
+    if (typeof jsonSchema.exclusiveMinimum === "number") num = num.gt(jsonSchema.exclusiveMinimum);
+    if (typeof jsonSchema.exclusiveMaximum === "number") num = num.lt(jsonSchema.exclusiveMaximum);
+    return num;
+  }
+  if (type === "boolean") return z.boolean();
+  if (type === "array") {
+    const prefix = jsonSchema.prefixItems as Record<string, unknown>[] | undefined;
+    if (Array.isArray(prefix) && prefix.length > 0) {
+      const tuple = z.tuple(prefix.map(jsonSchemaToZod) as [] | [z.ZodType, ...z.ZodType[]]);
+      return jsonSchema.items && typeof jsonSchema.items === "object"
+        ? tuple.rest(jsonSchemaToZod(jsonSchema.items as Record<string, unknown>))
+        : tuple;
+    }
+    const items = (jsonSchema.items ?? {}) as Record<string, unknown>;
+    let arr = z.array(jsonSchemaToZod(items));
+    if (typeof jsonSchema.minItems === "number") arr = arr.min(jsonSchema.minItems);
+    if (typeof jsonSchema.maxItems === "number") arr = arr.max(jsonSchema.maxItems);
+    return arr;
   }
   if (type === "object" || jsonSchema.properties) {
     const properties = (jsonSchema.properties ?? {}) as Record<
       string,
       Record<string, unknown>
     >;
+    const additional = jsonSchema.additionalProperties;
+    if (Object.keys(properties).length === 0 && additional && typeof additional === "object") {
+      // A mapping: Python `dict[str, T]`.
+      return z.record(jsonSchemaToZod(additional as Record<string, unknown>));
+    }
+    const required = Array.isArray(jsonSchema.required)
+      ? new Set(jsonSchema.required as string[])
+      : null;
     const shape: Record<string, z.ZodType> = {};
     for (const [key, propSchema] of Object.entries(properties)) {
-      shape[key] = jsonSchemaToZod(propSchema);
+      let prop = jsonSchemaToZod(propSchema);
+      if (required !== null && !required.has(key) && !("default" in propSchema)) {
+        prop = prop.optional();
+      }
+      shape[key] = prop;
     }
-    return z.object(shape);
+    const obj = z.object(shape);
+    if (additional === false) return obj.strict();
+    if (additional && typeof additional === "object") {
+      return obj.catchall(jsonSchemaToZod(additional as Record<string, unknown>));
+    }
+    return obj.passthrough();
   }
 
   // Fallback: accept anything

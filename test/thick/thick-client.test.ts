@@ -183,6 +183,9 @@ describe("ThickAtomDocClient resync", () => {
     });
     const resynced = vi.fn();
     client.onResync(resynced);
+    // Online, with a socket that swallows sends: the edit is sent, not buffered.
+    (client as unknown as { online: boolean; ws: unknown }).online = true;
+    (client as unknown as { ws: unknown }).ws = { send() {} };
 
     // A local edit that the server will reject.
     client.setField("i1", "label", "optimistic");

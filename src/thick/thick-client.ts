@@ -71,7 +71,11 @@ export class ThickAtomDocClient {
       this.ws = ws;
 
       ws.onopen = () => {
+        const wasOffline = !this.online && this.doc !== null;
         this.online = true;
+        if (wasOffline) {
+          for (const cb of this.onlineCallbacks) cb();
+        }
         resolve();
       };
 
@@ -282,6 +286,15 @@ export class ThickAtomDocClient {
       }
     });
 
+    // Edits made while offline were applied to the old local doc and are
+    // not in the snapshot: replay them as fresh local transactions, which
+    // sends them. One the server rejects comes back as a resync.
+    const replay = this.bufferedOps;
+    this.bufferedOps = [];
+    for (const ops of replay) {
+      this.doc.applyOperations(ops);
+    }
+
     for (const cb of this.connectedCallbacks) cb();
     if (isResync) {
       for (const cb of this.resyncCallbacks) cb();
@@ -291,10 +304,12 @@ export class ThickAtomDocClient {
   private _handlePatch(msg: PatchMsg): void {
     this.version = msg.version;
 
-    if (msg.source_client === this.clientId) {
-      // Self-echo: already applied locally, just update version
+    if (msg.source_client === this.clientId && this.pendingOps.length > 0) {
+      // Self-echo of an op we applied locally: just update version.
       this.pendingOps.shift();
     } else {
+      // Remote change — or our own op echoed after a resync dropped the
+      // pending list (the snapshot predates it), which must be applied.
       // Remote change: apply to local doc (flag to prevent re-sending,
       // skipUndo so another user's edits never enter local undo history)
       if (this.doc) {

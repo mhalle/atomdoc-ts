@@ -230,7 +230,7 @@ describe("ref fields", () => {
 
   it("exports references as node ids in the JSON schema", () => {
     const props = refSchema.node_types.Volume.json_schema.properties as Record<string, unknown>;
-    expect(props.transform).toEqual({ type: "string", default: null });
+    expect(props.transform).toEqual({ anyOf: [{ type: "string" }, { type: "null" }], default: null });
     expect(props.sources).toEqual({ type: "array", items: { type: "string" }, default: [] });
   });
 

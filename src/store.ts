@@ -74,11 +74,20 @@ export class NodeStore {
   // --- Snapshot loading ---
 
   loadSnapshot(data: JsonDoc): void {
+    const previous = [...this.nodes.keys()];
     this.batch(() => {
       this.nodes.clear();
       this.rootId = data[0];
       this._loadNode(data, null, null);
+      // Every node that existed before or exists now has (potentially)
+      // changed: a resync must reach every subscriber.
+      for (const id of new Set([...previous, ...this.nodes.keys()])) {
+        this._notify(id);
+      }
     });
+    for (const id of previous) {
+      if (!this.nodes.has(id)) this.listeners.delete(id);
+    }
   }
 
   private _loadNode(

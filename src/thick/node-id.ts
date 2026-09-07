@@ -2,7 +2,7 @@
  * Lamport-timestamp node ID generation — port of _id.py.
  *
  * IDs have the format: {sessionId}.{clock}
- * - sessionId: base64(elapsed_ms) + random(3)
+ * - sessionId: base64(elapsed_ms) + random(5)
  * - clock: monotonically incrementing base64 counter
  */
 
