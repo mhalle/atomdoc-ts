@@ -458,7 +458,7 @@ describe("second review: thick client", () => {
         operations: { ordered: [[0, [["x", "Item"]], 0, "children", "d", 0]], state: {} },
       });
       expect(ids(c.getDoc()!)).toEqual(["a", "b", "c", "d", "x", uId]);
-      // The server recorded the insert with a different neighbour than we
+      // The server recorded the insert with a different neighbor than we
       // sent, so it is not a verbatim echo: source_client is null, but
       // the ref is ours and that is what identifies our request.
       ws.deliver({

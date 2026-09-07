@@ -1,5 +1,5 @@
 /**
- * Behaviour ported from DocNode v0.4: move replay keeping position,
+ * Behavior ported from DocNode v0.4: move replay keeping position,
  * undo eviction order, transaction flags (skipUndo), merge interval,
  * history export/import, mergeOperations, and the thick client keeping
  * remote patches out of local undo.

@@ -20,7 +20,7 @@ edits instead of skipping and applying blindly. Requires atomdoc >= 0.4.0
   and then skipped its own echo stayed at the remote value while the
   server kept the client's. An echo is now reconciled instead of
   skipped: state fields are set to the echoed values and inserted nodes
-  are moved to the neighbours the server recorded, so the local document
+  are moved to the neighbors the server recorded, so the local document
   converges on the server's order. A convergence harness
   (`test/integration/convergence.test.ts`) drives a real thick client
   against the real Python session while a fake device commits host-side
@@ -31,7 +31,7 @@ edits instead of skipping and applying blindly. Requires atomdoc >= 0.4.0
   refreshed so undoing it reveals the remote value (`UndoManager.
   refreshOriginal`). The harness checks on every patch that a field with
   a pending write shows the pending value.
-- **Another client's acknowledgement could retire this client's pending
+- **Another client's acknowledgment could retire this client's pending
   work.** Refs were `op-N` in every client, and a patch's `ref` was
   matched before its source was checked. Refs are now
   `<client_id>:<n>` and only a ref this client minted can match.

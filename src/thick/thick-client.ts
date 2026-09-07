@@ -34,7 +34,7 @@ export interface ThickClientOptions {
 /**
  * The operations that bring a local document, which already applied the
  * request optimistically, to what the server recorded for it (`echo`):
- * a node the echo inserts is moved to the echoed neighbours if the client
+ * a node the echo inserts is moved to the echoed neighbors if the client
  * has it, or inserted there if it does not (a server-side normalizer
  * added it); moves replay as they are; deletes need nothing; state
  * patches replay as they are.
@@ -412,7 +412,7 @@ export class ThickAtomDocClient {
       // the server's order is "theirs, then ours", and the patch
       // describes the result: each state field is set to the value the
       // server holds, and each node we inserted is moved to the
-      // neighbours the server placed it between. That converges the
+      // neighbors the server placed it between. That converges the
       // local document on the server's order. A later pending edit of
       // ours on the same field must not be overwritten by this older
       // value, so the echo is masked by the ops still pending (all later
