@@ -26,6 +26,23 @@ class SlotEdits {
     return list;
   }
 
+  /** Slot names of `parentId` this patch has a working list for. */
+  slotsOf(parentId: string): string[] {
+    const prefix = parentId + "\u0000";
+    const names: string[] = [];
+    for (const key of this.lists.keys()) {
+      if (key.startsWith(prefix)) names.push(key.slice(prefix.length));
+    }
+    return names;
+  }
+
+  /** The child lists of a node this patch has removed are not written. */
+  drop(parentId: string): void {
+    for (const key of [...this.lists.keys()]) {
+      if (key.startsWith(parentId + "\u0000")) this.lists.delete(key);
+    }
+  }
+
   flush(): void {
     for (const [key, list] of this.lists) {
       const sep = key.indexOf("\u0000");
@@ -150,17 +167,27 @@ function applyDelete(
 
   // Remove nodes and their descendants
   for (const id of toRemove) {
-    removeRecursive(store, id);
+    removeRecursive(store, slots, id);
   }
 }
 
-function removeRecursive(store: NodeStore, nodeId: string): void {
+/**
+ * Remove a node and its subtree. The subtree is read through the
+ * patch's working child lists, not the store's: an earlier operation in
+ * the same patch may have moved a child out (it must survive) or in (it
+ * must go).
+ */
+function removeRecursive(store: NodeStore, slots: SlotEdits, nodeId: string): void {
   const stack = [nodeId];
   while (stack.length > 0) {
     const id = stack.pop()!;
     const node = store.getNode(id);
     if (!node) continue;
-    for (const childIds of Object.values(node.slots)) stack.push(...childIds);
+    // A slot the store never saw children in (an insert earlier in this
+    // patch) exists only as a working list.
+    const names = new Set([...Object.keys(node.slots), ...slots.slotsOf(id)]);
+    for (const slotName of names) stack.push(...slots.get(id, slotName));
+    slots.drop(id);
     store._removeNode(id);
   }
 }

@@ -531,6 +531,74 @@ describe("second review: thick client", () => {
     });
   });
 
+  it("does not resurrect a node a later pending op deleted, and keeps the echo's next hint", async () => {
+    await withFakeWebSocket(async () => {
+      const c = new ThickAtomDocClient({ url: "ws://x" });
+      const p = c.connect();
+      const ws = FakeWS.instances[0];
+      ws.onopen?.();
+      await p;
+      boot(ws);
+      // Create then delete before the create's echo arrives (create + Ctrl-Z).
+      const ghost = c.createNode("Item", { name: "ghost" }, c.getDoc()!.root.id, "children");
+      c.deleteNode(ghost);
+      const [op1, op2] = sentOps(ws);
+      ws.deliver({ type: "patch", version: 1, source_client: "me", ref: op1.ref, operations: op1.operations! });
+      expect(c.getDoc()!.getNode(ghost)).toBeUndefined();
+      ws.deliver({ type: "patch", version: 2, source_client: "me", ref: op2.ref, operations: op2.operations! });
+      expect(ids(c.getDoc()!)).toEqual(["a", "b", "c", "d"]);
+      // Insert after "a", then delete "a"; the verbatim echoes must be no-ops
+      // because the echo's `next` hint places the node when `prev` is gone.
+      const n = c.getDoc()!.createNode("Item", { name: "n1" });
+      c.getDoc()!.insertIntoSlot(c.getDoc()!.root, "children", "after", [n], c.getDoc()!.getNode("a")!);
+      c.deleteNode("a");
+      const [, , op3, op4] = sentOps(ws);
+      expect(ids(c.getDoc()!)).toEqual([n.id, "b", "c", "d"]);
+      ws.deliver({ type: "patch", version: 3, source_client: "me", ref: op3.ref, operations: op3.operations! });
+      ws.deliver({ type: "patch", version: 4, source_client: "me", ref: op4.ref, operations: op4.operations! });
+      expect(ids(c.getDoc()!)).toEqual([n.id, "b", "c", "d"]);
+    });
+  });
+
+  it("applies a no-op echo as a correction to the server's placement", async () => {
+    await withFakeWebSocket(async () => {
+      const c = new ThickAtomDocClient({ url: "ws://x" });
+      const p = c.connect();
+      const ws = FakeWS.instances[0];
+      ws.onopen?.();
+      await p;
+      boot(ws);
+      // We move d before a; another client moved a after d first, so on
+      // the server our move was already satisfied and committed nothing.
+      c.moveNodeRelative("d", "a", "before");
+      const [op1] = sentOps(ws);
+      expect(ids(c.getDoc()!)).toEqual(["d", "a", "b", "c"]);
+      ws.deliver({
+        type: "patch", version: 1, source_client: null, ref: "other:1",
+        operations: { ordered: [[2, "a", 0, 0, "children", "d", 0]], state: {} },
+      });
+      // Masked: we have a pending move of d, but not of a — a moves after d locally.
+      expect(ids(c.getDoc()!)).toEqual(["d", "a", "b", "c"]);
+      // The server answers at the same version with the slot's full order
+      // as a chain of moves: the remote move was vacuous in our frame, so
+      // more than the moved node is out of place.
+      ws.deliver({
+        type: "patch", version: 1, source_client: null, ref: op1.ref,
+        operations: {
+          ordered: [
+            [2, "b", 0, 0, "children", 0, 0],
+            [2, "c", 0, 0, "children", "b", 0],
+            [2, "d", 0, 0, "children", "c", 0],
+            [2, "a", 0, 0, "children", "d", 0],
+          ],
+          state: {},
+        },
+      });
+      expect(ids(c.getDoc()!)).toEqual(["b", "c", "d", "a"]);
+      expect(c.getVersion()).toBe(1);
+    });
+  });
+
   it("fires online callbacks after the reconnect snapshot is applied", async () => {
     await withFakeWebSocket(async () => {
       const c = new ThickAtomDocClient({ url: "ws://x" });

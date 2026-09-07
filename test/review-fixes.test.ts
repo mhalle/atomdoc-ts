@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import { LocalDoc, RefIntegrityError } from "../src/thick/local-doc.js";
 import { ThickAtomDocClient } from "../src/thick/thick-client.js";
 import { NodeStore } from "../src/store.js";
+import { applyPatch } from "../src/patch.js";
 import { SchemaRegistry } from "../src/schema.js";
 import { defineNode, defineValue, buildSchema } from "../src/define.js";
 import { getSlotChildren } from "../src/thick/doc-node.js";
@@ -168,6 +169,25 @@ describe("review fixes: store and client", () => {
     expect(onN3).toHaveBeenCalledTimes(2);
     store._updateState("n3", "name", "changed");
     expect(onN3).toHaveBeenCalledTimes(3);
+  });
+
+  it("applyPatch deletes a subtree as it is after earlier ops in the same patch", () => {
+    const store = new NodeStore();
+    store.loadSnapshot([
+      "01jqp00000000000000000000",
+      "Root",
+      {},
+      { items: [["a", "Item", {}, { kids: [["x", "Item", {}]] }], ["b", "Item", {}]] },
+    ]);
+    // x moved out of a, then a deleted: x survives.
+    applyPatch(store, { ordered: [[2, "x", 0, 0, "items", 0, 0], [1, "a", 0]], state: {} });
+    expect(store.getChildren(store.getRootId(), "items")).toEqual(["b", "x"]);
+    expect(store.getNode("x")).toBeDefined();
+    expect(store.getNode("a")).toBeUndefined();
+    // n1 inserted under b, then b deleted: n1 goes with it.
+    applyPatch(store, { ordered: [[0, [["n1", "Item"]], "b", "kids", 0, 0], [1, "b", 0]], state: {} });
+    expect(store.getNode("n1")).toBeUndefined();
+    expect(store.getAllNodeIds().sort()).toEqual(["01jqp00000000000000000000", "x"]);
   });
 
   function onlineClient(sent: WireOperations[]): ThickAtomDocClient {

@@ -4,6 +4,24 @@
 
 ### Fixed
 
+- **`applyPatch` deleted the wrong subtree when an earlier operation in
+  the same patch had moved or inserted a child** (a regression of the
+  per-patch slot coalescing below): a node moved out of the deleted
+  subtree was lost, one inserted into it leaked. Subtrees are now walked
+  through the patch's working child lists.
+- **Echo reconciliation resurrected a node the client had already
+  deleted** (create, then delete or undo before the create's echo). A
+  node missing locally is re-inserted only if no still-pending op of the
+  client's deleted it.
+- **Echo reconciliation dropped the echo's `next` neighbor**, so a
+  verbatim echo whose `prev` was deleted locally meanwhile appended the
+  node to the end instead of leaving it in place.
+- **A move or write the server found already satisfied got no reply**, so
+  the requester's pending op never retired and its slot order could stay
+  wrong for good. The server now answers such a request alone with the
+  slot's real order (see PROTOCOL.md, "A request that changes nothing").
+  A two-thick-client convergence harness (`test/integration/two-clients.
+  test.ts`) covers concurrent moves, creates, deletes and writes.
 - **Filling a slot node by node through the thin store was quadratic.**
   `applyPatch` copied the parent's child array on every insert, delete
   or move. A patch now edits each touched child list once and writes it

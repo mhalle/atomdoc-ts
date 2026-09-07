@@ -618,6 +618,12 @@ bridgeDocToStore(doc, store):
 
 Reuses the same `applyPatch` as the thin client.
 
+Note that a snapshot omits fields at their default and a `create` patch
+carries a node's full state, so a thin `NodeStore` holds `undefined` for
+a defaulted field of a node that arrived in the snapshot and the default
+value for one created during the session. Read defaults through
+`SchemaRegistry.getDefaults()` rather than comparing raw store state.
+
 #### 12. Self-Echo Handling
 
 The server broadcasts patches to ALL clients, including the source. The thick client must not re-apply its own changes:
@@ -676,10 +682,31 @@ client refreshes the recorded original of the oldest pending edit of
 that field to the masked value, in the undo entry that edit landed in
 (merged entries included).
 
+**A request that changes nothing.** A move the server finds already
+satisfied, or a write of the value already held, commits nothing and so
+produces no broadcast. The requester still applied it optimistically and
+must learn where the server stands, so the server answers it alone with a
+`patch` at the *current* version (no increment) carrying the request's
+`ref` and `source_client: null`: for every slot the request's inserts or
+moves touched, the slot's full order as a chain of moves (append the
+first node, then each node after its predecessor), and for every state
+entry the value as stored. The whole slot is sent because a request that
+was vacuous on the server usually means the requester's picture of the
+slot differs in more than the moved node: a remote move it applied in
+between was vacuous in its own frame. Applying the chain is a no-op for
+nodes already in place. A client must accept a patch whose version equals
+its current one.
+
+Reconciliation never re-inserts a node that a still-pending op of the
+client's own deleted (create then delete before the create's echo): the
+node stays gone, and the delete's echo needs nothing.
+
 Together, reconciliation and masking converge every interleaving of one
 client with host-side changes (a device writing into the session's
 document) and of several clients under the server's total order, with
-no transient state the server did not itself pass through.
+no transient state the server did not itself pass through. The
+`test/integration/two-clients.test.ts` harness checks this with two
+thick clients editing the same fields and slots.
 
 #### 13. Remote Echo Guard
 

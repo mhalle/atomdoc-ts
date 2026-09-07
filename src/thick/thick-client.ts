@@ -35,24 +35,34 @@ export interface ThickClientOptions {
  * The operations that bring a local document, which already applied the
  * request optimistically, to what the server recorded for it (`echo`):
  * a node the echo inserts is moved to the echoed neighbors if the client
- * has it, or inserted there if it does not (a server-side normalizer
- * added it); moves replay as they are; deletes need nothing; state
- * patches replay as they are.
+ * has it, or inserted there if it does not — unless a still-pending op
+ * of ours deleted it, in which case it stays gone (a server-side
+ * normalizer adding a node is the only other way for it to be missing);
+ * moves replay as they are; deletes need nothing; state patches replay
+ * as they are.
  */
-function echoReconcileOps(doc: LocalDoc, echo: WireOperations): WireOperations {
+function echoReconcileOps(
+  doc: LocalDoc,
+  echo: WireOperations,
+  pendingDeleted: Set<string>,
+): WireOperations {
   const ordered: OrderedOp[] = [];
   for (const op of echo.ordered) {
     if (op[0] === 0) {
       const [, pairs, parentId, slotName, prevId, nextId] = op;
       let prev: string | 0 = prevId;
+      // The echoed `next` is a hint for the first node only: `prev` is
+      // preferred when it resolves, `next` is the fallback when it does
+      // not (deleted locally meanwhile). Later nodes follow the previous.
+      let next: string | 0 = nextId;
       for (const [id, type] of pairs) {
-        const next = prev ? 0 : nextId;
         if (doc.getNode(id)) {
           ordered.push([2, id, 0, parentId, slotName, prev, next]);
-        } else {
+        } else if (!pendingDeleted.has(id)) {
           ordered.push([0, [[id, type]], parentId, slotName, prev, next]);
         }
         prev = id;
+        next = 0;
       }
     } else if (op[0] === 2) {
       ordered.push(op);
@@ -82,7 +92,13 @@ export class ThickAtomDocClient {
    * event's inverse (the object the undo manager holds too), refreshed
    * when a remote write underneath is masked.
    */
-  private pendingOps: Array<{ ref: string; ops: WireOperations; inverse: WireOperations }> = [];
+  private pendingOps: Array<{
+    ref: string;
+    ops: WireOperations;
+    inverse: WireOperations;
+    /** IDs the op deleted, so an earlier echo does not resurrect them. */
+    deleted: Set<string>;
+  }> = [];
   private bufferedOps: WireOperations[] = [];
   private applyingRemote = false;
   private nextRef = 1;
@@ -372,7 +388,7 @@ export class ThickAtomDocClient {
     // Forward local changes to server (skip if we're applying a remote patch)
     this.docUnsub = this.doc.onChange((event) => {
       if (!this.applyingRemote) {
-        this._sendOps(event.operations, event.inverseOperations);
+        this._sendOps(event.operations, event.inverseOperations, new Set(event.diff.deleted.keys()));
       }
     });
 
@@ -418,7 +434,12 @@ export class ThickAtomDocClient {
       // value, so the echo is masked by the ops still pending (all later
       // than it) before it is replayed. Nothing here is sent back or
       // undoable.
-      const reconcile = this._maskPending(echoReconcileOps(this.doc!, msg.operations), false);
+      const pendingDeleted = new Set<string>();
+      for (const entry of this.pendingOps) for (const id of entry.deleted) pendingDeleted.add(id);
+      const reconcile = this._maskPending(
+        echoReconcileOps(this.doc!, msg.operations, pendingDeleted),
+        false,
+      );
       if (this.doc && (reconcile.ordered.length > 0 || Object.keys(reconcile.state).length > 0)) {
         this.applyingRemote = true;
         try {
@@ -494,12 +515,12 @@ export class ThickAtomDocClient {
     return { ordered, state };
   }
 
-  private _sendOps(ops: WireOperations, inverse: WireOperations): void {
+  private _sendOps(ops: WireOperations, inverse: WireOperations, deleted: Set<string>): void {
     if (this.online && this.ws) {
       // Unique across clients: the server-assigned client ID plus a
       // counter. A ref is what ties a patch back to a pending op.
       const ref = `${this.clientId}:${this.nextRef++}`;
-      this.pendingOps.push({ ref, ops, inverse });
+      this.pendingOps.push({ ref, ops, inverse, deleted });
       this._send({
         type: "op",
         ref,
