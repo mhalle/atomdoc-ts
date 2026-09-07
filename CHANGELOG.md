@@ -1,6 +1,11 @@
 # Changelog
 
-## Unreleased
+## 0.4.2
+
+Fixes from a fourth adversarial review and an end-to-end integration
+pass, plus a performance suite. Pairs with atomdoc 0.4.2, which sends
+slot-order corrections after moves; works with 0.4.1 minus that
+guarantee.
 
 ### Fixed
 
