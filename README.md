@@ -427,6 +427,8 @@ doc.root;                  // root DocNode
 doc.nodeMap;               // Map<string, DocNode>
 
 // Subscribe to changes
+// Listeners are post-commit observers: every one runs, the commit stands,
+// and a listener that throws surfaces afterwards as a ListenerError.
 doc.onChange((event) => {
   console.log("Forward ops:", event.operations);
   console.log("Inverse ops:", event.inverseOperations);

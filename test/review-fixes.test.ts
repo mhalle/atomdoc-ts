@@ -219,7 +219,7 @@ describe("review fixes: store and client", () => {
       type: "patch",
       version: 1,
       source_client: "me",
-      ref: "op-1",
+      ref: "me:1",
       operations: { ordered: [], state: { n1: { name: "local" } } },
     });
     expect((c as unknown as { pendingOps: unknown[] }).pendingOps).toEqual([]);

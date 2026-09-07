@@ -273,7 +273,7 @@ document's last commit, whoever made it. Under `none` the request is
 answered with code `unsupported`. The history is dropped when the client
 disconnects. Thick clients undo locally and never send these messages.
 
-**Note:** `ref` is optional on all client messages. If provided, it's echoed back in error responses for correlation.
+**Note:** `ref` is optional on all client messages. If provided, it is echoed back in the `error` reply and in every `patch` the request produces. Refs must be unique across clients — prefix them with the server-assigned `client_id` (the thick client sends `<client_id>:<n>`) — because the server does not check ownership: a client must only treat a `ref` it minted itself as an acknowledgement of its own pending work.
 
 ## Operations Format
 

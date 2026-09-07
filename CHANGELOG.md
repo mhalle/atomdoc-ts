@@ -47,10 +47,15 @@ with atomdoc >= 0.3.0.
   transaction failure now propagates and only the outermost boundary
   rolls back; a batch is atomic; an undo that cannot apply throws and
   keeps its step.
-- **A throwing change listener committed the transaction** instead of
-  rolling it back, and the undo manager kept an entry for it. Listeners
-  now receive copies, a failure rolls back, and the undo manager takes
-  its entry back.
+- **A throwing change listener left the document inconsistent with what
+  other listeners had seen.** Change listeners are now post-commit
+  observers: every listener runs, the commit stands, events are copies,
+  and failures are thrown afterwards as `ListenerError` (with `errors`
+  and `cause`). An undo whose observer fails is not put back.
+- **Another client's acknowledgement could retire this client's pending
+  work.** Refs were `op-N` in every client, and a patch's `ref` was
+  matched before its source was checked. Refs are now
+  `<client_id>:<n>` and only a ref this client minted can match.
 - **A handle to a node that was deleted and restored (undo, rollback)
   went stale**; the restore now revives the same object, and a stale
   object is refused rather than corrupting the tree.

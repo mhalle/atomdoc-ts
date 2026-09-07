@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { z } from "zod";
-import { LocalDoc } from "../src/thick/local-doc.js";
+import { LocalDoc, ListenerError } from "../src/thick/local-doc.js";
 import { withTransaction } from "../src/thick/local-transaction.js";
 import { UndoManager } from "../src/thick/undo-manager.js";
 import { ThickAtomDocClient } from "../src/thick/thick-client.js";
@@ -171,20 +171,46 @@ describe("second review: LocalDoc transactions", () => {
     expect(doc.toSnapshot()).toEqual(make().toSnapshot());
   });
 
-  it("a throwing change listener rolls the transaction back", () => {
+  it("change listeners are post-commit observers", () => {
     const doc = make();
     const um = new UndoManager(doc, 100);
-    const seen: unknown[] = [];
-    doc.onChange((e) => seen.push(structuredClone(e.operations)));
-    doc.onChange(() => {
+    const first: unknown[] = [];
+    const last: unknown[] = [];
+    doc.onChange((e) => first.push(structuredClone(e.operations)));
+    const unsubscribe = doc.onChange(() => {
       throw new Error("listener boom");
     });
-    expect(() => doc.setNodeState("a", "name", "CHANGED")).toThrow("listener boom");
-    expect(doc.getNode("a")!.state.name).toBe("a");
+    doc.onChange((e) => last.push(e));
+    let caught: unknown;
+    try {
+      doc.setNodeState("a", "name", "CHANGED");
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(ListenerError);
+    expect((caught as ListenerError).cause).toEqual(new Error("listener boom"));
+    // The commit stands, every listener ran, and undo knows about it.
+    expect(doc.getNode("a")!.state.name).toBe("CHANGED");
     expect(doc._lifecycleStage).toBe("idle");
-    expect(um.canUndo).toBe(false);
-    // What the first listener received was not rewritten by the rollback.
-    expect(seen).toEqual([{ ordered: [], state: { a: { name: "CHANGED" } } }]);
+    expect(first).toEqual([{ ordered: [], state: { a: { name: "CHANGED" } } }]);
+    expect(last.length).toBe(1);
+    expect(um.canUndo).toBe(true);
+    unsubscribe();
+    um.undo();
+    expect(doc.getNode("a")!.state.name).toBe("a");
+    // A listener failing during an undo does not put the step back.
+    doc.onChange(() => {
+      throw new Error("again");
+    });
+    expect(() => um.redo()).toThrow(ListenerError);
+    expect(doc.getNode("a")!.state.name).toBe("CHANGED");
+    expect(um.canRedo).toBe(false);
+    expect(um.canUndo).toBe(true);
+    // Lenient applyOperations never swallows a listener failure.
+    expect(() =>
+      doc.applyOperations({ ordered: [], state: { b: { name: "x" } } }),
+    ).toThrow(ListenerError);
+    expect(doc.getNode("b")!.state.name).toBe("x");
   });
 
   it("a node handle survives undo and rollback", () => {
@@ -346,6 +372,42 @@ describe("second review: thick client", () => {
       expect(internals.pendingOps).toEqual([]);
       expect(sentOps(ws).length).toBe(2);
       expect(c.getDoc()!.getNode("c")!.state.name).toBe("C");
+    });
+  });
+
+  it("another client's ref never retires our pending work", async () => {
+    await withFakeWebSocket(async () => {
+      const c = new ThickAtomDocClient({ url: "ws://x" });
+      const p = c.connect();
+      const ws1 = FakeWS.instances[0];
+      ws1.onopen?.();
+      await p;
+      boot(ws1);
+      c.setField("a", "name", "mine");
+      const [op] = sentOps(ws1);
+      expect(op.ref).toBe("me:1");
+      // Another client's first request also numbered 1.
+      ws1.deliver({
+        type: "patch", version: 1, source_client: "other", ref: "other:1",
+        operations: { ordered: [], state: { b: { name: "theirs" } } },
+      });
+      const internals = c as unknown as { pendingOps: Array<{ ref: string }> };
+      expect(internals.pendingOps.map((x) => x.ref)).toEqual(["me:1"]);
+      // Even a ref that collides textually with ours is ignored unless
+      // it is ours: the prefix is the server-assigned client id.
+      ws1.deliver({
+        type: "patch", version: 2, source_client: "other", ref: "op-1",
+        operations: { ordered: [], state: { c: { name: "c2" } } },
+      });
+      expect(internals.pendingOps.length).toBe(1);
+      // The socket drops before our op is acknowledged: it is replayed.
+      ws1.onclose?.();
+      const p2 = c.connect();
+      const ws2 = FakeWS.instances[1];
+      ws2.onopen?.();
+      await p2;
+      boot(ws2, 5);
+      expect(sentOps(ws2).map((x) => x.operations!.state.a?.name)).toEqual(["mine"]);
     });
   });
 

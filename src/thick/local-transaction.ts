@@ -4,7 +4,7 @@
  * No normalize or strict mode stages.
  */
 
-import type { LocalDoc } from "./local-doc.js";
+import { ListenerError, type LocalDoc } from "./local-doc.js";
 
 export type LifecycleStage = "idle" | "update" | "change";
 
@@ -72,6 +72,9 @@ export function withTransaction(
     try {
       doc.forceCommit();
     } catch (e) {
+      // A ListenerError means the commit is final and only an observer
+      // failed: never swallow that, whatever mode we are in.
+      if (e instanceof ListenerError) throw e;
       try {
         doc.abort();
       } catch {

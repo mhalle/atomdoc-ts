@@ -300,8 +300,13 @@ export class ThickAtomDocClient {
     }
   }
 
-  /** Forget pending operations up to and including `ref`; true if found. */
+  /**
+   * Forget pending operations up to and including `ref`; true if found.
+   * Only a ref this client minted can match: refs carry the client's ID,
+   * so another client's `ref` can never retire our pending work.
+   */
   private _dropPending(ref: string): boolean {
+    if (!ref.startsWith(this.clientId + ":")) return false;
     const idx = this.pendingOps.findIndex((p) => p.ref === ref);
     if (idx < 0) return false;
     this.pendingOps.splice(0, idx + 1);
@@ -385,7 +390,9 @@ export class ThickAtomDocClient {
 
   private _sendOps(ops: WireOperations): void {
     if (this.online && this.ws) {
-      const ref = `op-${this.nextRef++}`;
+      // Unique across clients: the server-assigned client ID plus a
+      // counter. A ref is what ties a patch back to a pending op.
+      const ref = `${this.clientId}:${this.nextRef++}`;
       this.pendingOps.push({ ref, ops });
       this._send({
         type: "op",

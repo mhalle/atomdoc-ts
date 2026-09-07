@@ -56,6 +56,29 @@ export class RefIntegrityError extends Error {
   }
 }
 
+/**
+ * One or more change listeners threw after a transaction committed.
+ *
+ * Change listeners are observers: they run once the commit is final, so
+ * a failing listener cannot undo what other listeners (the store bridge,
+ * the network) have already seen. The document keeps the change; this
+ * error reports the failures to the caller afterwards. `errors` holds
+ * every value thrown, in listener order; the first is also `cause`.
+ */
+export class ListenerError extends Error {
+  readonly errors: unknown[];
+  constructor(errors: unknown[]) {
+    const first = errors[0];
+    const text = first instanceof Error ? `${first.name}: ${first.message}` : String(first);
+    const more = errors.length > 1 ? ` (+${errors.length - 1} more)` : "";
+    super(`${errors.length} change listener(s) failed after commit: ${text}${more}`, {
+      cause: first,
+    });
+    this.name = "ListenerError";
+    this.errors = errors;
+  }
+}
+
 /** IDs held by a reference field value (a string or an array of strings). */
 function refIds(value: unknown): string[] {
   if (typeof value === "string") return [value];
@@ -98,9 +121,6 @@ export class LocalDoc {
   private schema: AtomDocSchema;
   private idGen: () => string;
   private changeListeners: Array<(e: ChangeEvent) => void> = [];
-  private rollbackListeners: Array<() => void> = [];
-  /** Set while change listeners run for a commit, cleared when it is done. */
-  private changeNotified = false;
   /**
    * Nodes removed from the document, by ID, for as long as someone still
    * holds them. A rollback or undo that re-inserts the same ID revives
@@ -736,9 +756,8 @@ export class LocalDoc {
 
       this._lifecycleStage = "change";
       // The event owns copies: listeners may keep it (the undo manager
-      // does), and a rollback after a failed listener must not rewrite
-      // what earlier listeners already received. Inverse ops are
-      // recorded in forward order; hand them out in application order.
+      // does) and the document reuses nothing they received. Inverse ops
+      // are recorded in forward order; hand them out in application order.
       const event: ChangeEvent = {
         operations: {
           ordered: [...this._forwardOps.ordered],
@@ -756,20 +775,19 @@ export class LocalDoc {
         },
         flags: { ...this._transactionFlags },
       };
-      this.changeNotified = true;
-      try {
-        for (const cb of [...this.changeListeners]) {
+      // Listeners are observers of a commit that is already final: every
+      // one of them runs, whatever the others do, and failures are
+      // reported together afterwards (see ListenerError).
+      const errors: unknown[] = [];
+      for (const cb of [...this.changeListeners]) {
+        try {
           cb(event);
+        } catch (e) {
+          errors.push(e);
         }
-      } catch (e) {
-        // A listener failed. Reopen the transaction and leave the
-        // recorded operations in place so the caller (withTransaction)
-        // can roll back.
-        this._lifecycleStage = "update";
-        throw e;
       }
-      this.changeNotified = false;
       this._reset();
+      if (errors.length > 0) throw new ListenerError(errors);
       return;
     }
 
@@ -785,6 +803,7 @@ export class LocalDoc {
   }
 
   abort(): void {
+    if (this._lifecycleStage === "idle") return; // nothing open
     // Inverse ops are recorded in forward order; roll back in reverse,
     // through the tracked mutators so the reverse reference index follows.
     const inverse: WireOperations = {
@@ -795,13 +814,6 @@ export class LocalDoc {
       this._applyOps(inverse);
     } finally {
       // Whatever happens, the document must not stay in the update stage.
-      if (this.changeNotified) {
-        // Change listeners already ran for this transaction (one of them
-        // failed). Whoever kept a record of it (the undo manager) must
-        // forget it.
-        this.changeNotified = false;
-        for (const cb of [...this.rollbackListeners]) cb();
-      }
       this._reset();
       this._rebuildRefIndex();
     }
@@ -817,18 +829,6 @@ export class LocalDoc {
     };
   }
 
-  /**
-   * Called when a commit is rolled back *after* its change listeners ran
-   * (a later listener threw). Listeners that recorded the change must
-   * take it back.
-   */
-  onCommitRolledBack(cb: () => void): () => void {
-    this.rollbackListeners.push(cb);
-    return () => {
-      const idx = this.rollbackListeners.indexOf(cb);
-      if (idx >= 0) this.rollbackListeners.splice(idx, 1);
-    };
-  }
 
   // --- Serialization ---
 

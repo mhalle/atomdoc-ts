@@ -7,7 +7,7 @@
  */
 
 import type { OrderedOp, WireOperations } from "../types.js";
-import type { LocalDoc, ChangeEvent } from "./local-doc.js";
+import { ListenerError, type LocalDoc, type ChangeEvent } from "./local-doc.js";
 import { mergeOperations } from "./local-ops.js";
 
 export interface UndoManagerOptions {
@@ -45,15 +45,6 @@ export class UndoManager {
   private txType: "update" | "undo" | "redo" = "update";
   private lastUpdate: number | undefined;
   private unsub: () => void;
-  private unsubRollback: () => void;
-  /**
-   * How the last change event altered the stacks, so a commit that fails
-   * after this manager saw it can be taken back exactly.
-   */
-  private lastChange:
-    | { kind: "update"; undoStack: UndoStackItem[]; ops: Array<[UndoStackItem, WireOperations]>; redoStack: UndoStackItem[]; lastUpdate: number | undefined }
-    | { kind: "redoPush" | "undoPush"; item: UndoStackItem }
-    | null = null;
 
   constructor(doc: LocalDoc, maxSteps = 100, options: UndoManagerOptions = {}) {
     this.doc = doc;
@@ -63,9 +54,6 @@ export class UndoManager {
     this.unsub = this.isEnabled
       ? doc.onChange((event) => this._onChange(event))
       : () => {};
-    this.unsubRollback = this.isEnabled
-      ? doc.onCommitRolledBack(() => this._discardLastChange())
-      : () => {};
   }
 
   get isEnabled(): boolean {
@@ -73,19 +61,11 @@ export class UndoManager {
   }
 
   private _onChange(event: ChangeEvent): void {
-    this.lastChange = null;
     if (event.flags?.skipUndo) return;
     const item: UndoStackItem = { operations: event.inverseOperations, meta: {} };
     if (this.txType === "update") {
       const now = this.clock();
       const last = this.undoStack[this.undoStack.length - 1];
-      this.lastChange = {
-        kind: "update",
-        undoStack: [...this.undoStack],
-        ops: this.undoStack.map((it) => [it, it.operations]),
-        redoStack: [...this.redoStack],
-        lastUpdate: this.lastUpdate,
-      };
       if (
         last !== undefined &&
         this.lastUpdate !== undefined &&
@@ -104,31 +84,9 @@ export class UndoManager {
     } else if (this.txType === "undo") {
       this.redoStack.push(item);
       this.txType = "update";
-      this.lastChange = { kind: "redoPush", item };
     } else if (this.txType === "redo") {
       this.undoStack.push(item);
       this.txType = "update";
-      this.lastChange = { kind: "undoPush", item };
-    }
-  }
-
-  /**
-   * Take back what the last change event did to the stacks: the document
-   * rolled that commit back after a later listener failed.
-   */
-  private _discardLastChange(): void {
-    const change = this.lastChange;
-    this.lastChange = null;
-    if (!change) return;
-    if (change.kind === "update") {
-      this.undoStack = change.undoStack;
-      for (const [it, ops] of change.ops) it.operations = ops;
-      this.redoStack = change.redoStack;
-      this.lastUpdate = change.lastUpdate;
-    } else if (change.kind === "redoPush") {
-      if (this.redoStack[this.redoStack.length - 1] === change.item) this.redoStack.pop();
-    } else if (this.undoStack[this.undoStack.length - 1] === change.item) {
-      this.undoStack.pop();
     }
   }
 
@@ -141,10 +99,11 @@ export class UndoManager {
     try {
       this.doc.applyOperations(item.operations, undefined, true);
     } catch (e) {
-      // The step could not be applied (a node it re-creates exists
-      // again, say). Keep it so the user can retry after the cause is
-      // gone, instead of silently losing it.
-      this.undoStack.push(item);
+      // A ListenerError means the step applied and committed; only an
+      // observer failed. Otherwise the step could not be applied (a node
+      // it re-creates exists again, say): keep it so the user can retry
+      // after the cause is gone, instead of silently losing it.
+      if (!(e instanceof ListenerError)) this.undoStack.push(item);
       throw e;
     } finally {
       this.txType = "update";
@@ -160,7 +119,7 @@ export class UndoManager {
     try {
       this.doc.applyOperations(item.operations, undefined, true);
     } catch (e) {
-      this.redoStack.push(item);
+      if (!(e instanceof ListenerError)) this.redoStack.push(item);
       throw e;
     } finally {
       this.txType = "update";
@@ -184,7 +143,6 @@ export class UndoManager {
 
   dispose(): void {
     this.unsub();
-    this.unsubRollback();
   }
 
   // --- History transfer ---

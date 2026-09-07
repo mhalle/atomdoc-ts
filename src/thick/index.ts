@@ -1,4 +1,4 @@
-export { LocalDoc, RefIntegrityError, type ChangeEvent } from "./local-doc.js";
+export { LocalDoc, RefIntegrityError, ListenerError, type ChangeEvent } from "./local-doc.js";
 export { type DocNode, createDocNode, getSlotChildren } from "./doc-node.js";
 export {
   UndoManager,
